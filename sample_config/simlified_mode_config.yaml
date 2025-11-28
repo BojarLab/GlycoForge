@@ -1,0 +1,35 @@
+# Config for simplified mode
+output_dir: "results/simplified_mode"
+verbose: true
+save_csv: true
+show_pca_plots: false
+
+data_source: simulated
+n_glycans: 50
+n_H: 15
+n_U: 15
+
+# Note: In simplified mode, Bio Factor parameters are NOT used 
+
+# Batch Factor Parameters
+n_batches: 3
+affected_fraction: [0.1, 0.5]  # Fraction range of affected glycans per batch
+positive_prob: 0.6             # Probability of positive effects
+overlap_prob: 0.5              # Probability of overlap between batches
+
+# Batch Effect Strength (Support Grid Search: list or single value)
+kappa_mu: [0.5, 1.0 , 1.5, 2.0]  # Mean shift strength control per batch = kappa_mu * sigma * u_b
+var_b: [0.5, 1.0, 1.5, 2.0]          # Variance ratio per batch = var_b * baseline_variance
+
+
+# Random seed list for multiple runs with different random initializations
+# Each seed controls:
+# 1. Dirichlet sampling in simulate_clean_data() - biological variability between samples
+# 2. Batch assignment in stratified_batches_from_columns() - which samples go to which batch
+# 3. Noise generation in apply_batch_effect() - random variance added by batch effects
+# 4. Add noise to zero-variance glycans in simulate_clean_data()
+# Note: Batch direction vectors (u_dict) are generated ONCE using ALL seeds together,
+#       ensuring consistent batch structure across all runs for fair comparison.
+random_seeds: [42, 123, 2024, 7, 99, 56, 88, 314, 271, 1618]  # Use for quick testing
+#random_seeds: [2024]
+ 

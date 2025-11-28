@@ -1,0 +1,57 @@
+# Config for Hybrid Mode 
+output_dir: "results/hybrid_mode"
+verbose: true
+save_csv: true
+show_pca_plots: true
+
+
+# Data Source Configuration
+data_source: "real"
+data_file: "data/glycomics_human_leukemia_O_PMID34646384.csv"  
+use_real_effect_sizes: true
+
+# Biological Signal Configuration
+n_H: 15
+n_U: 15
+
+# Differential Mask Options:
+# - "Null": No biological signal injected (all zeros). Useful for negative control.
+# - "All": Inject signal into all glycans (all ones).
+# - "de-based"or"significant": Use significant glycans (p < 0.05) from glycowork.motif.analysis.get_differential_expression analysis.
+# - "Top-N": Use the top N glycans with the largest Cohen's d effect sizes (e.g., "Top-10") from glycowork.motif.analysis.get_differential_expression analysis.
+differential_mask: "de-based" 
+
+# Bio Factor Parameters (Support Grid Search: list or single value)
+# Note: In hybrid mode, these control how the real bio effect sizes are injected
+bio_strength: [1.5]       # Scaling factor for effect sizes in CLR space
+k_dir: [80]              # Dirichlet concentration (inverse of biological noise)
+variance_ratio: 1.3     # k_dir_Unhealthy variance / k_dir_Healthy variance , suggestion value >= 1.0
+
+# Robust Bio Factor Processing Parameters.
+# scaling_strategy:
+#   - "clip" (Default, Strong Recommendation): Caps features exceeding the limit. Best for data with outliers.
+#   - "scale": Shrinks ALL features proportionally. Preserves relative ratios but may kill signal if outliers are huge.
+scaling_strategy: "clip"  
+max_fold_change: 3.0 # Maximum allowed fold change (e.g., 3.0 = 300% change), revents single features from dominating the composition 
+
+# Batch Effect Strength (Support Grid Search: list or single value)
+kappa_mu: 1.5    # Mean shift strength, Can be single values or lists for grid search
+var_b: 1.0      # Variance inflation factor
+
+# Batch Factor Parameters
+n_batches: 3
+affected_fraction: [0.1, 0.5]  # Fraction range of affected glycans per batch
+positive_prob: 0.6             # Probability of positive effects
+overlap_prob: 0.5              # Probability of overlap between batches
+
+
+# Random seed list for multiple runs with different random initializations
+# Each seed controls:
+# 1. Dirichlet sampling in simulate_clean_data() - biological variability between samples
+# 2. Batch assignment in stratified_batches_from_columns() - which samples go to which batch
+# 3. Noise generation in apply_batch_effect() - random variance added by batch effects
+# 4. Add noise to zero-variance glycans in simulate_clean_data()
+# Note: Batch direction vectors (u_dict) are generated ONCE using ALL seeds together,
+#       ensuring consistent batch structure across all runs for fair comparison.
+random_seeds: [43]  # Use for quick testing
+ 
