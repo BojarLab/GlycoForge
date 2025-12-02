@@ -1,8 +1,8 @@
 # Config for Hybrid Mode 
-output_dir: "results/hybrid_mode"
-verbose: true
+output_dir: "results/hybrid_mode_batch_test"
+verbose: false
 save_csv: true
-show_pca_plots: true
+show_pca_plots: false
 
 
 # Data Source Configuration
@@ -10,33 +10,38 @@ data_source: "real"
 data_file: "data/glycomics_human_leukemia_O_PMID34646384.csv"  
 use_real_effect_sizes: true
 
+# Column prefix mapping for real data (optional, defaults: healthy="R7", unhealthy="BM")
+column_prefix:
+  healthy: "R7"       # Columns starting with this prefix are treated as healthy/control group
+  unhealthy: "BM"     # Columns starting with this prefix are treated as unhealthy/disease group
+
 # Biological Signal Configuration
-n_H: 15
-n_U: 15
+n_H: 30
+n_U: 30
 
 # Differential Mask Options:
 # - "Null": No biological signal injected (all zeros). Useful for negative control.
 # - "All": Inject signal into all glycans (all ones).
 # - "de-based"or"significant": Use significant glycans (p < 0.05) from glycowork.motif.analysis.get_differential_expression analysis.
 # - "Top-N": Use the top N glycans with the largest Cohen's d effect sizes (e.g., "Top-10") from glycowork.motif.analysis.get_differential_expression analysis.
-differential_mask: "de-based" 
+differential_mask: "Top-5" 
 
 # Bio Factor Parameters (Support Grid Search: list or single value)
 # Note: In hybrid mode, these control how the real bio effect sizes are injected
-bio_strength: [1.5]       # Scaling factor for effect sizes in CLR space
-k_dir: [80]              # Dirichlet concentration (inverse of biological noise)
-variance_ratio: 1.3     # k_dir_Unhealthy variance / k_dir_Healthy variance , suggestion value >= 1.0
+bio_strength: 1.5   # Scaling factor for effect sizes in CLR space
+k_dir: 120            # Dirichlet concentration (inverse of biological noise)
+variance_ratio: 1.5    # k_dir_Unhealthy variance / k_dir_Healthy variance , suggestion value >= 1.0
 
 # Robust Bio Factor Processing Parameters.
 # scaling_strategy:
 #   - "clip" (Default, Strong Recommendation): Caps features exceeding the limit. Best for data with outliers.
 #   - "scale": Shrinks ALL features proportionally. Preserves relative ratios but may kill signal if outliers are huge.
 scaling_strategy: "clip"  
-max_fold_change: 3.0 # Maximum allowed fold change (e.g., 3.0 = 300% change), revents single features from dominating the composition 
+max_fold_change: 2.5 # Maximum allowed fold change (e.g., 3.0 = 300% change), revents single features from dominating the composition 
 
 # Batch Effect Strength (Support Grid Search: list or single value)
-kappa_mu: 1.5    # Mean shift strength, Can be single values or lists for grid search
-var_b: 1.0      # Variance inflation factor
+kappa_mu: [0.5,1.0, 1.2, 1.5, 2.0]    # Mean shift strength, Can be single values or lists for grid search
+var_b:  [ 0.5, 1.0, 1.2, 1.5, 2.0]      # Variance inflation factor
 
 # Batch Factor Parameters
 n_batches: 3
@@ -53,5 +58,5 @@ overlap_prob: 0.5              # Probability of overlap between batches
 # 4. Add noise to zero-variance glycans in simulate_clean_data()
 # Note: Batch direction vectors (u_dict) are generated ONCE using ALL seeds together,
 #       ensuring consistent batch structure across all runs for fair comparison.
-random_seeds: [43]  # Use for quick testing
- 
+#random_seeds: [42, 123, 2024, 7, 99, 56, 88, 314, 271, 1618] 
+random_seeds: [42, 123 , 2024] 

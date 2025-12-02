@@ -15,7 +15,5 @@ from .pipeline import simulate
 # Utility functions
 from .utils import clr, invclr
 
-# Batch correction pipeline (downstream use case)
-from .pipeline_unified import unified_batch_correction_pipeline
-
-__all__ = ['simulate', 'clr', 'invclr', 'unified_batch_correction_pipeline']
+# Expose core API
+__all__ = ['simulate', 'clr', 'invclr']

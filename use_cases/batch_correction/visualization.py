@@ -45,8 +45,8 @@ def extract_metrics_with_calculations(all_results, random_seeds=None):
     # Auto-detect parameter names from first combo
     if all_results:
         first_combo = next(iter(all_results.values()))
-        if 'k_dir' in first_combo and 'bio_strength' in first_combo:
-            param1_name, param2_name = 'k_dir', 'bio_strength'
+        if 'bio_strength' in first_combo and 'k_dir' in first_combo:
+            param1_name, param2_name = 'bio_strength', 'k_dir'
         else:
             param1_name, param2_name = 'kappa_mu', 'var_b'
     
@@ -527,11 +527,12 @@ def plot_parameter_grid_metrics(all_results=None, results_dir="results", save_pa
         
         all_results = {}
         
-        # Find all parameter combination directories - support both formats
+        # Find all parameter combination directories
+        # Support both simple formats (2 params) and hybrid format (4 params)
         combo_dirs = glob.glob(f"{results_dir}/kappa_mu_*_var_b_*") + \
                      glob.glob(f"{results_dir}/*/kappa_mu_*_var_b_*") + \
-                     glob.glob(f"{results_dir}/k_dir_*_bio_strength_*") + \
-                     glob.glob(f"{results_dir}/*/k_dir_*_bio_strength_*")
+                     glob.glob(f"{results_dir}/bio_strength_*_k_dir_*") + \
+                     glob.glob(f"{results_dir}/*/bio_strength_*_k_dir_*")
         
         if not combo_dirs:
             print(f"Error: No parameter combination directories found in {results_dir}")
@@ -539,12 +540,22 @@ def plot_parameter_grid_metrics(all_results=None, results_dir="results", save_pa
         
         # Auto-detect parameter format from first directory
         first_dir = os.path.basename(combo_dirs[0])
-        if 'k_dir' in first_dir and 'bio_strength' in first_dir:
-            param1_name, param2_name = 'k_dir', 'bio_strength'
-            param1_idx, param2_idx = 2, 5  # k_dir_X_bio_strength_Y
-        else:
+        
+        # Check if it's hybrid format (has all 4 parameters)
+        if 'bio_strength' in first_dir and 'k_dir' in first_dir and 'kappa_mu' in first_dir and 'var_b' in first_dir:
+            # Hybrid format: bio_strength_X_k_dir_Y_kappa_mu_Z_var_b_W
+            # Split: ['bio', 'strength', 'X', 'k', 'dir', 'Y', 'kappa', 'mu', 'Z', 'var', 'b', 'W']
+            # We care about kappa_mu and var_b (batch params) in hybrid mode
             param1_name, param2_name = 'kappa_mu', 'var_b'
-            param1_idx, param2_idx = 2, 5  # kappa_mu_X_var_b_Y
+            param1_idx, param2_idx = 8, 11  # Indices for Z and W in the split array
+        elif 'bio_strength' in first_dir and 'k_dir' in first_dir:
+            # Simple bio format: bio_strength_X_k_dir_Y
+            param1_name, param2_name = 'bio_strength', 'k_dir'
+            param1_idx, param2_idx = 2, 5  # ['bio', 'strength', 'X', 'k', 'dir', 'Y']
+        else:
+            # Simple batch format: kappa_mu_X_var_b_Y
+            param1_name, param2_name = 'kappa_mu', 'var_b'
+            param1_idx, param2_idx = 2, 5  # ['kappa', 'mu', 'X', 'var', 'b', 'Y']
         
         if verbose:
             print(f"Detected parameter format: {param1_name} x {param2_name}")
@@ -838,6 +849,80 @@ def plot_parameter_grid_metrics(all_results=None, results_dir="results", save_pa
                 print(f"Differential expression metrics plot saved to: {save_path_3}")
         plt.show()
         plots_created.append('differential_expression_change_metrics')
+
+        heatmap_targets = [
+            'recovery_overlap_change_rate',
+            'recovery_false_positive_change_rate'
+        ]
+        heatmap_targets = [m for m in heatmap_targets if m in diff_metrics]
+
+        if heatmap_targets:
+            # Pre-compute heatmap data so we can share a consistent color scale across plots.
+            heatmap_data_map = {}
+            vmin, vmax = np.inf, -np.inf
+
+            for metric_name in heatmap_targets:
+                heatmap_data = np.full((len(param2_values), len(param1_values)), np.nan)
+                for col_idx, param1_val in enumerate(param1_values):
+                    for row_idx, param2_val in enumerate(param2_values):
+                        values = diff_metrics[metric_name].get((param1_val, param2_val), [])
+                        if values:
+                            heatmap_data[row_idx, col_idx] = np.mean(values)
+
+                if np.any(~np.isnan(heatmap_data)):
+                    current_min = np.nanmin(heatmap_data)
+                    current_max = np.nanmax(heatmap_data)
+                    vmin = min(vmin, current_min)
+                    vmax = max(vmax, current_max)
+
+                heatmap_data_map[metric_name] = heatmap_data
+
+            if not np.isfinite(vmin) or not np.isfinite(vmax):
+                # No numeric data available; fall back to a small symmetric range.
+                vmin, vmax = -1.0, 1.0
+            elif vmin == vmax:
+                # Expand a constant range slightly so the colormap remains informative.
+                margin = abs(vmin) * 0.1 if vmin != 0 else 1.0
+                vmin -= margin
+                vmax += margin
+
+            fig_h, axes_h = plt.subplots(1, len(heatmap_targets), figsize=(6 * len(heatmap_targets), 6), constrained_layout=True)
+            if not isinstance(axes_h, np.ndarray):
+                axes_h = np.array([axes_h])
+
+            scalar_mappables = []
+            for ax_h, metric_name in zip(axes_h, heatmap_targets):
+                heatmap_data = heatmap_data_map[metric_name]
+                im = ax_h.imshow(heatmap_data, origin='lower', aspect='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+                scalar_mappables.append(im)
+
+                ax_h.set_xticks(np.arange(len(param1_values)))
+                ax_h.set_xticklabels([f"{val:g}" for val in param1_values], rotation=45, ha='right')
+                ax_h.set_yticks(np.arange(len(param2_values)))
+                ax_h.set_yticklabels([f"{val:g}" for val in param2_values])
+
+                ax_h.set_xlabel(param_short_names.get(param1_name, param1_name), fontsize=12)
+                ax_h.set_ylabel(param_short_names.get(param2_name, param2_name), fontsize=12)
+
+                title = metric_info.get(metric_name, {}).get('name', metric_name.replace('_', ' ').title())
+                ax_h.set_title(f"{title}", fontsize=14, fontweight='bold')
+
+                for row_idx in range(len(param2_values)):
+                    for col_idx in range(len(param1_values)):
+                        if np.isnan(heatmap_data[row_idx, col_idx]):
+                            ax_h.text(col_idx, row_idx, 'NA', ha='center', va='center', color='white', fontsize=9, fontweight='bold')
+
+            if scalar_mappables:
+                cbar = fig_h.colorbar(scalar_mappables[0], ax=axes_h, fraction=0.046, pad=0.04)
+                cbar.ax.set_ylabel('Mean Value', rotation=270, labelpad=15)
+
+            if save_path:
+                save_path_h = f'{save_path}3b_differential_expression_heatmaps.png'
+                plt.savefig(save_path_h, dpi=300, bbox_inches='tight')
+                if verbose:
+                    print(f"Differential expression heatmaps saved to: {save_path_h}")
+            plt.show()
+            plots_created.append('differential_expression_heatmaps')
     
     if verbose:
         print(f"Created {len(plots_created)} separate plots: {plots_created}")

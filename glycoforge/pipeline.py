@@ -5,10 +5,10 @@ import os
 import json
 
 from plot import plot_pca
-from sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, add_noise_to_zero_variance_features, define_dirichlet_params_from_real_data, define_differential_mask
+from sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_dirichlet_params_from_real_data, define_differential_mask
 from sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
 from utils import clr
-from metrics import quantify_batch_effect_impact,  check_batch_effect
+from metrics import check_batch_effect
 
 
 def simulate(
@@ -22,6 +22,7 @@ def simulate(
     variance_ratio=1.5,
     use_real_effect_sizes=False,
     differential_mask=None,
+    column_prefix=None,
     n_batches=3,
     affected_fraction=(0.05, 0.30),
     positive_prob=0.6,
@@ -98,6 +99,7 @@ def simulate(
                 'variance_ratio': variance_ratio,
                 'use_real_effect_sizes': use_real_effect_sizes,
                 'differential_mask': differential_mask,
+                'column_prefix': column_prefix,
                 'n_batches': n_batches,
                 'affected_fraction': affected_fraction,
                 'positive_prob': positive_prob,
@@ -162,8 +164,23 @@ def simulate(
         
     elif data_source == "real":
         df = pd.read_csv(data_file)
-        bm_cols = [c for c in df.columns if c.startswith("BM")]
-        r7_cols = [c for c in df.columns if c.startswith("R7")]
+        
+        # Get column prefixes (with defaults)
+        if column_prefix is None:
+            column_prefix = {}
+        healthy_prefix = column_prefix.get('healthy', 'R7')
+        unhealthy_prefix = column_prefix.get('unhealthy', 'BM')
+        
+        # Find columns by prefix
+        r7_cols = [c for c in df.columns if c.startswith(healthy_prefix)]
+        bm_cols = [c for c in df.columns if c.startswith(unhealthy_prefix)]
+        
+        if not r7_cols or not bm_cols:
+            raise ValueError(
+                f"No columns found with prefixes: healthy='{healthy_prefix}', unhealthy='{unhealthy_prefix}'. "
+                f"Available columns: {df.columns.tolist()[:10]}... "
+                f"Please check 'column_prefix' in config."
+            )
         
         # Get actual number of glycans from real data
         n_glycans_real = df.shape[0]
@@ -344,13 +361,6 @@ def simulate(
             Y_clean_clr, 
             {'Healthy': ['healthy'], 'Unhealthy': ['unhealthy']}
         )
-        detailed_metrics = quantify_batch_effect_impact(
-            Y_with_batch_clr, 
-            batch_labels, 
-            bio_groups, 
-            verbose=verbose
-        )
-        
         if verbose:
             print("\n" + "=" * 60)
             print("QUICK BATCH EFFECT CHECK")
@@ -406,7 +416,6 @@ def simulate(
             'n_batches': n_batches,
             'key_parameters': key_parameters,
             'quickly_check_batch_effect': check_batch_effect_results,
-            'detailed_batch_metrics': detailed_metrics,
             'data_info': {
                 'bio_labels': bio_labels.tolist(),
                 'batch_labels': batch_labels.tolist(),

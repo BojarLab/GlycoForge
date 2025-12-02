@@ -43,9 +43,22 @@ def generate_all_data(config, cache_dir):
     param_combinations = parse_parameter_grid(config)
     seeds_to_run = config.get('random_seeds', [42])
     
+    # Determine n_glycans: read from real data if in hybrid mode, otherwise use config
+    data_source = get_param(config, 'data_source', 'simulated')
+    if data_source == 'real':
+        data_file = get_param(config, 'data_file')
+        if data_file is None:
+            raise ValueError("data_file is required when data_source='real'")
+        df = pd.read_csv(data_file)
+        n_glycans = len(df)  # Number of glycans (rows in CSV)
+        if verbose:
+            print(f"[Hybrid Mode] Detected {n_glycans} glycans from real data: {data_file}")
+    else:
+        n_glycans = get_param(config, 'n_glycans', 50)
+    
     # Generate global u_dict once for all seeds ensuring consistent batch structure)
     u_dict_global = define_batch_direction(
-        n_glycans=get_param(config, 'n_glycans', 50),
+        n_glycans=n_glycans,
         n_batches=get_param(config, 'n_batches', 3),
         affected_fraction=get_param(config, 'affected_fraction', (0.05, 0.30)),
         positive_prob=get_param(config, 'positive_prob', 0.6),
@@ -90,12 +103,18 @@ def generate_all_data(config, cache_dir):
             
             simulate_kwargs = {
                 'data_source': get_param(config, 'data_source', 'simulated'),
+                'data_file': get_param(config, 'data_file'),
                 'n_glycans': get_param(config, 'n_glycans', 50),
                 'n_H': get_param(config, 'n_H', 15),
                 'n_U': get_param(config, 'n_U', 15),
-                'bio_strength': get_param(config, 'bio_strength', 1.5),
-                'k_dir': get_param(config, 'k_dir', 100),
+                'bio_strength': params.get('bio_strength', get_param(config, 'bio_strength', 1.5)),
+                'k_dir': params.get('k_dir', get_param(config, 'k_dir', 100)),
                 'variance_ratio': get_param(config, 'variance_ratio', 1.5),
+                'use_real_effect_sizes': get_param(config, 'use_real_effect_sizes', False),
+                'differential_mask': get_param(config, 'differential_mask', 'All'),
+                'column_prefix': get_param(config, 'column_prefix'),
+                'max_fold_change': get_param(config, 'max_fold_change', 3.0),
+                'scaling_strategy': get_param(config, 'scaling_strategy', 'clip'),
                 'n_batches': get_param(config, 'n_batches', 3),
                 'affected_fraction': get_param(config, 'affected_fraction', (0.05, 0.30)),
                 'positive_prob': get_param(config, 'positive_prob', 0.6),
@@ -217,12 +236,12 @@ def process_corrections(config, cache_dir):
             )
             
             if save_csv:
-                Y_clean.to_csv(f"{combo_output_dir}/1_Y_clean_seed{seed}.csv", float_format="%.6f")
-                Y_clean_clr.to_csv(f"{combo_output_dir}/1_Y_clean_clr_seed{seed}.csv", float_format="%.6f")
-                Y_with_batch.to_csv(f"{combo_output_dir}/2_Y_with_batch_seed{seed}.csv", float_format="%.6f")
-                Y_with_batch_clr.to_csv(f"{combo_output_dir}/2_Y_with_batch_clr_seed{seed}.csv", float_format="%.6f")
-                Y_corrected.to_csv(f"{combo_output_dir}/3_Y_after_combat_seed{seed}.csv", float_format="%.6f")
-                Y_corrected_clr.to_csv(f"{combo_output_dir}/3_Y_after_combat_clr_seed{seed}.csv", float_format="%.6f")
+                Y_clean.to_csv(f"{combo_output_dir}/1_Y_clean_seed{seed}.csv", float_format="%.16f")
+                Y_clean_clr.to_csv(f"{combo_output_dir}/1_Y_clean_clr_seed{seed}.csv", float_format="%.16f")
+                Y_with_batch.to_csv(f"{combo_output_dir}/2_Y_with_batch_seed{seed}.csv", float_format="%.16f")
+                Y_with_batch_clr.to_csv(f"{combo_output_dir}/2_Y_with_batch_clr_seed{seed}.csv", float_format="%.16f")
+                Y_corrected.to_csv(f"{combo_output_dir}/3_Y_after_combat_seed{seed}.csv", float_format="%.16f")
+                Y_corrected_clr.to_csv(f"{combo_output_dir}/3_Y_after_combat_clr_seed{seed}.csv", float_format="%.16f")
             
             # Save metadata from Phase 1 to final output directory
             metadata_output_path = f"{combo_output_dir}/metadata_seed{seed}.json"
