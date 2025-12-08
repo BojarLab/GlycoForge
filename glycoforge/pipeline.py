@@ -212,7 +212,43 @@ def simulate(
             impute=True
         )
         
-        real_effect_sizes = results['Effect size'].tolist()
+        # Reindex effect sizes to match input glycan order
+        # get_differential_expression may filter out some glycans, causing length mismatch
+        if 'glycan' in df.columns:
+            glycan_order = df['glycan'].astype(str).tolist()
+        else:
+            glycan_order = df.index.astype(str).tolist()
+        
+        # Convert results to indexed Series for alignment
+        if 'glycan' in results.columns:
+            effect_series = results.set_index('glycan')['Effect size']
+            if 'significant' in results.columns:
+                significant_series = results.set_index('glycan')['significant']
+            else:
+                significant_series = None
+        else:
+            effect_series = results['Effect size']
+            if 'significant' in results.columns:
+                significant_series = results['significant']
+            else:
+                significant_series = None
+        
+        # Reindex to full glycan list, fill missing with 0.0 (no effect injected)
+        effect_series_full = effect_series.reindex(glycan_order).fillna(0.0)
+        real_effect_sizes = effect_series_full.values
+        
+        if significant_series is not None:
+            significant_full = significant_series.reindex(glycan_order).fillna(False)
+            significant_mask_aligned = significant_full.values
+        else:
+            significant_mask_aligned = None
+        
+        if verbose:
+            n_original = len(effect_series)
+            n_full = len(real_effect_sizes)
+            n_missing = n_full - n_original
+            if n_missing > 0:
+                print(f"[Real Data] Reindexed effect sizes: {n_original} → {n_full} glycans ({n_missing} missing filled with 0.0)")
         
         if use_real_effect_sizes:
             # Extract healthy baseline from mean of all healthy samples
@@ -232,7 +268,7 @@ def simulate(
                 differential_mask, 
                 n_glycans=len(p_h),
                 effect_sizes=real_effect_sizes,
-                significant_mask=results['significant'].values if 'significant' in results.columns else None,
+                significant_mask=significant_mask_aligned,
                 verbose=verbose
             )
             

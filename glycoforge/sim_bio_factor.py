@@ -187,6 +187,20 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
     effect_sizes = np.asarray(effect_sizes, dtype=float)
     differential_mask = np.asarray(differential_mask, dtype=float)
     
+    # Validate array lengths for alignment
+    if len(effect_sizes) != len(p_h):
+        raise ValueError(
+            f"Effect sizes length ({len(effect_sizes)}) does not match p_h length ({len(p_h)}). "
+            f"Effect sizes must be reindexed to align with input glycan order in pipeline.py. "
+            f"This usually happens when get_differential_expression filters out some glycans."
+        )
+    
+    if len(differential_mask) != len(p_h):
+        raise ValueError(
+            f"Differential mask length ({len(differential_mask)}) does not match p_h length ({len(p_h)}). "
+            f"Mask must be generated with n_glycans={len(p_h)}."
+        )
+    
     # Handle zero values with glycan-wise imputation
     zero_mask = (p_h == 0)
     if np.any(zero_mask):

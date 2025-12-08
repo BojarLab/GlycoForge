@@ -7,7 +7,7 @@ show_pca_plots: false
 
 # Data Source Configuration
 data_source: "real"
-data_file: "data/glycomics_human_leukemia_O_PMID34646384.csv"  
+data_file: "data/glycomics_human_leukemia_N_PMID34646384.csv"  
 use_real_effect_sizes: true
 
 # Column prefix mapping for real data (optional, defaults: healthy="R7", unhealthy="BM")
