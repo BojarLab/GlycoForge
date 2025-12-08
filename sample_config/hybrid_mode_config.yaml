@@ -22,7 +22,8 @@ n_U: 30
 # Differential Mask Options:
 # - "Null": No biological signal injected (all zeros). Useful for negative control.
 # - "All": Inject signal into all glycans (all ones).
-# - "de-based"or"significant": Use significant glycans (p < 0.05) from glycowork.motif.analysis.get_differential_expression analysis.
+# - "significant": Use significant glycans marked by glycowork.motif.analysis.get_differential_expression 
+#   (using sample-size-adjusted alpha and FDR-corrected p-values via Benjamini-Hochberg or adaptive grouped methods).
 # - "Top-N": Use the top N glycans with the largest Cohen's d effect sizes (e.g., "Top-10") from glycowork.motif.analysis.get_differential_expression analysis.
 differential_mask: "Top-5" 
 

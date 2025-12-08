@@ -30,7 +30,10 @@ We keep everything in the CLR (centered log-ratio) world because glycan abundanc
 
 ## Two modes, one pipeline
 
+
 There are 2 mode in simulation pipeline `glycoforge/pipeline.py::simulate` entry point; you can swap the configuration:
+
+> Standard configuration files in the `sample_config/` and you can run 2 modes simualtion in the notebook [run_simulation.ipynb](run_simulation.ipynb).
 
 - **Simplified mode (`data_source="simulated"`)** – fully synthetic simulation without real data dependency. You specify the number of glycans (`n_glycans`), and the pipeline:
   1. Initializes a uniform healthy baseline: `alpha_H = ones(n_glycans) * 10`
@@ -50,7 +53,7 @@ There are 2 mode in simulation pipeline `glycoforge/pipeline.py::simulate` entry
   3. Reindexes effect sizes to match input glycan order (fills missing glycans with 0.0 if glycowork filters some out)
   4. Applies `differential_mask` to select which glycans receive biological signal injection:
      - `"All"`: inject into all glycans
-     - `"significant"`: only significant glycans (p < 0.05)
+     - `"significant"`: only glycans marked as significant by `glycowork` (using sample-size-adjusted alpha and corrected p-values)
      - `"Top-N"`: top N glycans by absolute effect size (e.g., `"Top-10"`)
   5. Processes effect sizes through `robust_effect_size_processing` (centers, clips extreme fold changes based on `max_fold_change` and `scaling_strategy`)
   6. Injects effects in CLR space: `z_U = z_H + m * bio_strength * d_robust`, where `z_H` is the healthy baseline CLR, `m` is the differential mask
@@ -61,11 +64,6 @@ There are 2 mode in simulation pipeline `glycoforge/pipeline.py::simulate` entry
   11. Grid search over `bio_strength`, `k_dir`, `kappa_mu`, `var_b` to test how biological signal strength and batch effects interact
   
   This mode keeps the virtual cohort faithful to real biological signal geometry while letting you systematically vary signal strength (`bio_strength`), concentration (`k_dir`), variance (`variance_ratio`), and batch effects for realistic batch correction benchmarking.
-
-
-## Examples
-
-Standard configuration files in the `sample_config/` and you can run 2 modes simualtion in the notebook [run_simulation.ipynb](run_simulation.ipynb).
 
 
 ## Use-case
