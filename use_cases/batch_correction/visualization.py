@@ -3,12 +3,10 @@ import glob
 import json
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 from matplotlib.patches import Patch
-from sklearn.decomposition import PCA
 import os
 from collections import defaultdict
-
+from matplotlib_venn import venn3, venn3_circles
 
 def calculate_batch_correction_changes(before_metrics, after_metrics):
     changes = {}
@@ -41,6 +39,7 @@ def extract_metrics_with_calculations(all_results, random_seeds=None):
     batch_change_metrics = defaultdict(lambda: defaultdict(list))
     batch_preservation_metrics = defaultdict(lambda: defaultdict(list))
     diff_metrics = defaultdict(lambda: defaultdict(list))
+    diff_absolute_metrics = defaultdict(lambda: defaultdict(list))  # For absolute rates
     
     # Auto-detect parameter names from first combo
     if all_results:
@@ -56,7 +55,7 @@ def extract_metrics_with_calculations(all_results, random_seeds=None):
         output_dir = combo_data['output_dir']
         
         # Find all JSON files in this directory
-        json_files = glob.glob(f"{output_dir}/comprehensive_metrics_seed*.json")
+        json_files = glob.glob(f"{output_dir}/correction_metrics_seed*.json")
         
         for json_file in json_files:
             try:
@@ -64,21 +63,60 @@ def extract_metrics_with_calculations(all_results, random_seeds=None):
                     metrics = json.load(f)
                 
                 # Get before and after batch metrics
-                batch_before = metrics.get('batch_effect_metrics', {}).get('before_correction', {})
-                batch_after = metrics.get('batch_effect_metrics', {}).get('after_correction', {})
+                batch_before = metrics.get('correction_results', {}).get('batch_correction', {}).get('before', {})
+                batch_after = metrics.get('correction_results', {}).get('batch_correction', {}).get('after', {})
                 
                 changes = calculate_batch_correction_changes(batch_before, batch_after)
                 for metric_name, value in changes.items():
                     batch_change_metrics[metric_name][(param1_val, param2_val)].append(value)
                     
-                preservation = calculate_biological_preservation(batch_after)
-                for metric_name, value in preservation.items():
-                    batch_preservation_metrics[metric_name][(param1_val, param2_val)].append(value)
+                # Get bio preservation metrics (convert to percentage)
+                bio_preservation = metrics.get('correction_results', {}).get('bio_preservation', {})
+                for metric_name, value in bio_preservation.items():
+                    if isinstance(value, (int, float)):
+                        batch_preservation_metrics[metric_name][(param1_val, param2_val)].append(value * 100)
 
-                diff_overall = metrics.get('differential_expression', {}).get('results', {}).get('overall', {})
-                for metric_name, value in diff_overall.items():
+                # Get differential expression summary
+                diff_summary = metrics.get('correction_results', {}).get('differential_expression', {}).get('summary', {})
+                for metric_name, value in diff_summary.items():
                     if isinstance(value, (int, float)):
                         diff_metrics[metric_name][(param1_val, param2_val)].append(value)
+                
+                # Extract absolute rates directly from the new JSON format
+                diff_expr = metrics.get('correction_results', {}).get('differential_expression', {})
+                
+                # Read pre-calculated rates from Y_with_batch and Y_after_correction
+                y_with_batch = diff_expr.get('Y_with_batch', {})
+                y_after_correction = diff_expr.get('Y_after_correction', {})
+                
+                # Extract TP rates (already calculated as rate_pct)
+                batch_tp_rate = y_with_batch.get('true_positive', {}).get('rate_pct', 0)
+                corrected_tp_rate = y_after_correction.get('true_positive', {}).get('rate_pct', 0)
+                
+                diff_absolute_metrics['tp_batch_rate'][(param1_val, param2_val)].append(batch_tp_rate)
+                diff_absolute_metrics['tp_corrected_rate'][(param1_val, param2_val)].append(corrected_tp_rate)
+                
+                # Extract FP rates (already calculated as rate_pct)
+                batch_fp_rate = y_with_batch.get('false_positive', {}).get('rate_pct', 0)
+                corrected_fp_rate = y_after_correction.get('false_positive', {}).get('rate_pct', 0)
+                
+                diff_absolute_metrics['fp_batch_rate'][(param1_val, param2_val)].append(batch_fp_rate)
+                diff_absolute_metrics['fp_corrected_rate'][(param1_val, param2_val)].append(corrected_fp_rate)
+                
+                # Extract F1, Precision, Recall for Figure 4, 5, 6
+                if 'f1_score' in y_with_batch:
+                    diff_metrics['batch_f1_score'][(param1_val, param2_val)].append(y_with_batch['f1_score'])
+                if 'precision' in y_with_batch:
+                    diff_metrics['batch_precision'][(param1_val, param2_val)].append(y_with_batch['precision'])
+                if 'recall' in y_with_batch:
+                    diff_metrics['batch_recall'][(param1_val, param2_val)].append(y_with_batch['recall'])
+                
+                if 'f1_score' in y_after_correction:
+                    diff_metrics['corrected_f1_score'][(param1_val, param2_val)].append(y_after_correction['f1_score'])
+                if 'precision' in y_after_correction:
+                    diff_metrics['corrected_precision'][(param1_val, param2_val)].append(y_after_correction['precision'])
+                if 'recall' in y_after_correction:
+                    diff_metrics['corrected_recall'][(param1_val, param2_val)].append(y_after_correction['recall'])
                         
             except Exception as e:
                 print(f"Error processing {json_file}: {e}")
@@ -86,91 +124,7 @@ def extract_metrics_with_calculations(all_results, random_seeds=None):
     
     all_batch_metrics = {**batch_change_metrics, **batch_preservation_metrics}
     
-    return all_batch_metrics, diff_metrics
-
-# Plot PCA for clean and simulated data
-def plot_pca(data, #DataFrame (features x samples)
-             bio_groups=None, # dict or None, e.g. {'healthy': ['healthy_1', 'healthy_2'], 'unhealthy': ['unhealthy_1']}
-             batch_groups=None, 
-             title="PCA", 
-             save_path=None):
-
-    pca = PCA(n_components=2)
-    pca_result = pca.fit_transform(data.T)
-    sample_names = data.columns.tolist()
-    
-    # Helper function to get bio/batch labels for annotation
-    def get_bio_label(sample_name):
-        if bio_groups:
-            for i, (group_name, cols) in enumerate(bio_groups.items()):  # 0-based
-                if sample_name in cols:
-                    return f"Bio-{i}"
-        return ""
-    
-    def get_batch_label(sample_name):
-        if batch_groups:
-            for batch_id, cols in batch_groups.items():
-                if sample_name in cols:
-                    return f"BE-{batch_id}"
-        return ""
-    
-    # Setup subplots
-    n_plots = sum([bio_groups is not None, batch_groups is not None])
-    if n_plots == 0:
-        return
-    fig, axes = plt.subplots(1, n_plots, figsize=(6*n_plots, 5))
-    axes = [axes] if n_plots == 1 else axes
-    plot_idx = 0
-    
-    # Plot biological groups (with batch annotations)
-    if bio_groups is not None:
-        bio_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
-        for i, (group_name, cols) in enumerate(bio_groups.items()):
-            indices = [sample_names.index(c) for c in cols if c in sample_names]
-            axes[plot_idx].scatter(pca_result[indices, 0], pca_result[indices, 1],
-                                  c=bio_colors[i % len(bio_colors)], label=group_name, alpha=0.7, s=50)
-            
-            # Add batch annotations on bio-colored plot
-            for idx in indices:
-                batch_label = get_batch_label(sample_names[idx])
-                if batch_label:
-                    axes[plot_idx].annotate(batch_label, (pca_result[idx, 0], pca_result[idx, 1]),
-                                          xytext=(2, 2), textcoords='offset points', 
-                                          fontsize=8, alpha=0.7)
-        
-        axes[plot_idx].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
-        axes[plot_idx].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
-        axes[plot_idx].set_title(f'{title}\n(colored by bio-groups)')
-        axes[plot_idx].legend()
-        axes[plot_idx].grid(alpha=0.3)
-        plot_idx += 1
-    
-    # Plot batch groups (with bio annotations)
-    if batch_groups is not None:
-        batch_colors = ['#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#FF6B35']
-        for i, (batch_id, cols) in enumerate(sorted(batch_groups.items())):
-            indices = [sample_names.index(c) for c in cols if c in sample_names]
-            axes[plot_idx].scatter(pca_result[indices, 0], pca_result[indices, 1],
-                                  c=batch_colors[i % len(batch_colors)], label=f'Batch {batch_id}', alpha=0.7, s=50)
-            
-            # Add bio annotations on batch-colored plot
-            for idx in indices:
-                bio_label = get_bio_label(sample_names[idx])
-                if bio_label:
-                    axes[plot_idx].annotate(bio_label, (pca_result[idx, 0], pca_result[idx, 1]),
-                                          xytext=(2, 2), textcoords='offset points', 
-                                          fontsize=8, alpha=0.7)
-        
-        axes[plot_idx].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
-        axes[plot_idx].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
-        axes[plot_idx].set_title(f'{title}\n(colored by batches)')
-        axes[plot_idx].legend()
-        axes[plot_idx].grid(alpha=0.3)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
+    return all_batch_metrics, diff_metrics, diff_absolute_metrics
 
 
 def visualize_batch_correction_results(results, save_path=None, verbose=True):
@@ -369,129 +323,102 @@ def visualize_batch_correction_results(results, save_path=None, verbose=True):
     else:
         plt.close()
 
-
-# Create visualization differential expression metrics
 def visualize_differential_expression_metrics(output_dir, save_plots=True, verbose=True):
     """
-    Visualize key batch correction metrics from JSON files with error bars across runs.
-    Uses comprehensive_metrics_seed*.json format.
+    Visualize differential expression with Venn diagrams showing overlap of significant glycans
+    across Y_clean, Y_with_batch, and Y_corrected datasets.
     """
+
     
-    # Load comprehensive metrics files
-    json_files = glob.glob(f"{output_dir}/comprehensive_metrics_seed*.json")
+    # Load correction metrics files
+    json_files = glob.glob(f"{output_dir}/correction_metrics_seed*.json")
     
     if verbose:
         print("=" * 60)
-        print("VISUALIZE_DIFFERENTIAL_EXPRESSION_METRICS")
+        print("VISUALIZE_DIFFERENTIAL_EXPRESSION_VENN_DIAGRAMS")
         print("=" * 60)
-        print(f"Found {len(json_files)} comprehensive metrics files.")
+        print(f"Found {len(json_files)} correction metrics files.")
         
     if not json_files:
-        print(f"Error: No comprehensive metrics files found in {output_dir}")
+        print(f"Error: No correction metrics files found in {output_dir}")
         return
     
-    # Initialize lists to store metrics
-    recovery_efficiency = []
-    recovery_false_positive_rate = []
-    overlap_1v2_rate = []
-    overlap_1v3_rate = []
-    fp_1v2_rate = []
-    fp_1v3_rate = []
+    # Collect sets across all runs
+    all_y_clean_sets = []
+    all_y_batch_sets = []
+    all_y_corrected_sets = []
     
-    # Extract metrics from each file
     for file_path in sorted(json_files):
         with open(file_path, 'r') as f:
             data = json.load(f)
         
-        # Extract differential expression data from comprehensive format
-        diff_data = data['differential_expression']
+        diff_expr = data.get('correction_results', {}).get('differential_expression', {})
         
-        # Extract metrics
-        recovery_efficiency.append(diff_data['results']['overall']['recovery_overlap_change_rate'])
-        recovery_false_positive_rate.append(diff_data['results']['overall']['recovery_false_positive_change_rate'])
-        overlap_1v2_rate.append(diff_data['results']['compare_1v2']['batch_effect_errors']['overlap_rate'])
-        overlap_1v3_rate.append(diff_data['results']['compare_1v3']['after_correction_errors']['overlap_rate'])
+        y_clean_glycans = set(diff_expr.get('Y_clean', {}).get('significant_glycans', []))
+        y_batch_glycans = set(diff_expr.get('Y_with_batch', {}).get('significant_glycans', []))
+        y_corrected_glycans = set(diff_expr.get('Y_corrected', {}).get('significant_glycans', []))
         
-        # Calculate FP rates: gained_signals / dataset1_significant_count * 100
-        dataset1_sig_count = diff_data['results']['dataset1']['significant_count']
-        gained_1v2_count = diff_data['results']['compare_1v2']['batch_effect_errors']['gained_counts']
-        gained_1v3_count = diff_data['results']['compare_1v3']['after_correction_errors']['gained_counts']
+        all_y_clean_sets.append(y_clean_glycans)
+        all_y_batch_sets.append(y_batch_glycans)
+        all_y_corrected_sets.append(y_corrected_glycans)
+    
+    # Create figure with subplots for each run
+    n_runs = len(json_files)
+    n_cols = min(3, n_runs)  # Max 3 columns
+    n_rows = (n_runs + n_cols - 1) // n_cols
+    
+    fig = plt.figure(figsize=(7 * n_cols, 6 * n_rows))
+    
+    for idx, (y_clean, y_batch, y_corrected) in enumerate(zip(all_y_clean_sets, all_y_batch_sets, all_y_corrected_sets)):
+        ax = fig.add_subplot(n_rows, n_cols, idx + 1)
         
-        fp_1v2_rate.append(gained_1v2_count / dataset1_sig_count * 100)
-        fp_1v3_rate.append(gained_1v3_count / dataset1_sig_count * 100)
-    
-    # Calculate mean and standard error
-    metrics_data = {
-        'Recovery Overlap\nChange Rate (%)': recovery_efficiency,
-        'Recovery FP\nChange Rate (%)': recovery_false_positive_rate,
-        '1v2 Overlap\nRate (%)': overlap_1v2_rate,
-        '1v3 Overlap\nRate (%)': overlap_1v3_rate,
-        '1v2 FP\nRate (%)': fp_1v2_rate,
-        '1v3 FP\nRate (%)': fp_1v3_rate
-    }
-
-    # Calculate means and stds, handling empty lists
-    means = []
-    stds = []
-    for values in metrics_data.values():
-        if len(values) > 0:
-            means.append(np.mean(values))
-            stds.append(np.std(values, ddof=1) if len(values) > 1 else 0)
-        else:
-            means.append(0)  # Default value for empty data
-            stds.append(0)
-    
-    if verbose:
-        # Check if any metrics have empty data
-        for metric_name, values in metrics_data.items():
-            if len(values) == 0:
-                print(f"Warning: No data for metric '{metric_name}'")
+        # Create Venn diagram
+        venn = venn3([y_clean, y_batch, y_corrected],
+                     set_labels=('Y_clean', 'Y_with_batch', 'Y_corrected'),
+                     set_colors=('#2E8B57', '#FF6347', '#4169E1'),
+                     alpha=0.6,
+                     ax=ax)
         
-        print("Recovery Overlap Change Rate = (overlap_1v3 - overlap_1v2) / dataset1_significant_count * 100")
-        print("Recovery FP Change Rate = (gained_1v3 - gained_1v2) / dataset1_significant_count * 100")
-        print("=" * 60)
+        # Add circles
+        venn3_circles([y_clean, y_batch, y_corrected], ax=ax, linewidth=1.5)
+        
+        # Calculate statistics
+        total_glycans = max(max(y_clean, default=0), max(y_batch, default=0), max(y_corrected, default=0))
+        overlap_clean_corrected = len(y_clean & y_corrected)
+        overlap_clean_batch = len(y_clean & y_batch)
+        
+        seed_num = json_files[idx].split("seed")[1].split(".")[0] if "seed" in json_files[idx] else idx+1
+        
+        ax.set_title(f'Run {idx + 1} (Seed: {seed_num})\\n' +
+                    f'Recovery: Clean∩Corrected={overlap_clean_corrected}/{len(y_clean)} ({overlap_clean_corrected/len(y_clean)*100:.1f}%)\\n' +
+                    f'Batch FP: {len(y_batch - y_clean)}, Correction FP: {len(y_corrected - y_clean)}',
+                    fontsize=11, fontweight='bold')
     
-
-
-    # Create the plot
-    fig, ax = plt.subplots(figsize=(12, 8))
-    
-    x_pos = np.arange(len(metrics_data))
-    bars = ax.bar(x_pos, means, yerr=stds, capsize=5, alpha=0.7, 
-                  color=['#2E8B57', '#2E8B57', '#4169E1', '#4169E1', '#8A2BE2', '#8A2BE2'])
-    
-    # Customize the plot
-    ax.set_xlabel('Metrics', fontsize=12)
-    ax.set_ylabel('Percentage (%)', fontsize=12)
-    ax.set_title('Differential Expression of Batch correction \n \n 1=Clean Data(no BE),\n 2=Data with BE, \n 3=Data after BE correction', fontsize=14, fontweight='bold')
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels(metrics_data.keys(), rotation=15, ha='right')
-    
-    # Add value labels on bars
-    for i, (mean, std) in enumerate(zip(means, stds)):
-        ax.text(i, mean + std + 0.5, f'{mean:.1f}±{std:.1f}', 
-                ha='center', va='bottom', fontweight='bold')
-    
-    # Add grid for better readability
-    ax.grid(axis='y', alpha=0.3)
-    
-    # Adjust y-axis to accommodate both positive and negative values
-    min_val = min(means) - max(stds)
-    max_val = max(means) + max(stds)
-    y_margin = (max_val - min_val) * 0.1
-    ax.set_ylim(min_val - y_margin, max_val + y_margin)
-    
-    # Add horizontal line at y=0 for reference
-    ax.axhline(y=0, color='black', linestyle='-', alpha=0.5, linewidth=0.8)
+    plt.suptitle(f'Differential Expression: Venn Diagrams Across {n_runs} Runs\\n' +
+                f'Significant Glycan Overlaps (Total glycans: ~{total_glycans})',
+                fontsize=16, fontweight='bold', y=0.995)
     
     plt.tight_layout()
+    
     if save_plots:
-        import os
         os.makedirs(output_dir, exist_ok=True)
-        save_path = f"{output_dir}/2_differential_expression_metrics.png"
+        save_path = f"{output_dir}/2_differential_expression_venn.png"
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Plot saved to: {save_path}")
+        print(f"Venn diagram saved to: {save_path}")
+    
     if verbose:
+        # Print summary statistics
+        print(f"\\nTotal runs: {n_runs}")
+        for idx, (y_clean, y_batch, y_corrected) in enumerate(zip(all_y_clean_sets, all_y_batch_sets, all_y_corrected_sets)):
+            print(f"\\nRun {idx + 1}:")
+            print(f"  Y_clean: {len(y_clean)} significant glycans")
+            print(f"  Y_with_batch: {len(y_batch)} significant glycans")
+            print(f"  Y_corrected: {len(y_corrected)} significant glycans")
+            print(f"  Clean ∩ Batch: {len(y_clean & y_batch)}")
+            print(f"  Clean ∩ Corrected: {len(y_clean & y_corrected)}")
+            print(f"  Batch ∩ Corrected: {len(y_batch & y_corrected)}")
+            print(f"  All 3: {len(y_clean & y_batch & y_corrected)}")
+        print("=" * 60)
         plt.show()
     else:
         plt.close()
@@ -606,7 +533,7 @@ def plot_parameter_grid_metrics(all_results=None, results_dir="results", save_pa
     if verbose:
         print(f"Parameter grid: {param1_name}={param1_values}, {param2_name}={param2_values}")
     
-    batch_metrics, diff_metrics = extract_metrics_with_calculations(all_results)
+    batch_metrics, diff_metrics, diff_absolute_metrics = extract_metrics_with_calculations(all_results)
     
     metric_info = {
         'silhouette': {'name': 'Silhouette Score', 'better': 'Lower'},
@@ -616,9 +543,7 @@ def plot_parameter_grid_metrics(all_results=None, results_dir="results", save_pa
         'compositional_effect_size': {'name': 'Compositional Effect Size', 'better': 'Lower'},
         'pca_batch_effect': {'name': 'PCA Batch Effect', 'better': 'Lower'},
         'biological_variability_preservation': {'name': 'Bio Variability Preservation', 'better': 'Higher'},
-        'conserved_differential_proportion': {'name': 'Conserved Differential Proportion', 'better': 'Higher'},
-        'recovery_overlap_change_rate': {'name': 'Recovery Overlap Change Rate', 'better': 'Higher'},
-        'recovery_false_positive_change_rate': {'name': 'Recovery False Positive Change Rate', 'better': 'Lower'}
+        'conserved_differential_proportion': {'name': 'Conserved Differential Proportion', 'better': 'Higher'}
     }
     
     # Create parameter combination labels with short display names
@@ -804,56 +729,147 @@ def plot_parameter_grid_metrics(all_results=None, results_dir="results", save_pa
             plt.show()
             plots_created.append('preservation_metrics')
     
-    # Figure 3: Differential expression metrics
-    if diff_metrics:
-        fig3, ax3 = plt.subplots(1, 1, figsize=(12, 8))
+ 
+    if diff_absolute_metrics:
+        fig3, (ax3_top, ax3_bottom) = plt.subplots(2, 1, figsize=(12, 12))
         
-        diff_colors = ["#6778B6", "#A46F6F"]
+        # Collect all data for both subplots to determine unified y-axis range
+        all_tp_means = []
+        all_tp_stds = []
+        all_fp_means = []
+        all_fp_stds = []
         
-        for idx, (metric_name, metric_data) in enumerate(diff_metrics.items()):
-            means, stds = [], []
-            for param1_val in param1_values:
-                for param2_val in param2_values:
-                    values = metric_data.get((param1_val, param2_val), [])
-                    means.append(np.mean(values) if values else 0)
-                    stds.append(np.std(values) if values else 0)
-            
-            if metric_name in metric_info:
-                direction = "↑" if metric_info[metric_name]['better'] == 'Higher' else "↓"
-                label = f"{metric_info[metric_name]['name']} {direction}"
-            else:
-                direction = "↑" if 'recovery' in metric_name and 'false' not in metric_name else "↓"
-                label = f"{metric_name.replace('_', ' ').title()} {direction}"
-            
-            color = diff_colors[idx % len(diff_colors)]
-            
-            ax3.errorbar(x_pos, means, yerr=stds,
-                        label=label, marker='o', capsize=3, 
-                        color=color, linestyle='-', 
-                        markersize=10, linewidth=2, 
-                        markerfacecolor=color, markeredgecolor=color, markeredgewidth=1)
+        # Store data for filling between curves
+        tp_data_dict = {}
+        fp_data_dict = {}
+        total_glycans_estimate = None
         
-        ax3.set_title('Differential Expression Metrics\n(↑ = higher better, ↓ = lower better)', fontweight='bold', fontsize=16)
-        ax3.set_xlabel('Parameter Combinations', fontsize=14)
-        ax3.set_ylabel('Metric Values', fontsize=14)
-        ax3.set_xticks(x_pos)
-        ax3.set_xticklabels(combo_labels, rotation=45, ha='right', fontsize=12)
-        ax3.legend(loc='upper left', fontsize=11)
-        ax3.grid(True, alpha=0.3)
+        # Subplot 1 (top): True Positive  Rates (2 lines: batch vs corrected)
+        tp_metric_names = ['tp_batch_rate', 'tp_corrected_rate']
+        tp_labels = ['Y_with_batch (With batch effect)', 'Y_corrected (After correction)']
+        tp_colors = ['#FF6347', '#4169E1']  # Red, Blue
+        
+        for metric_name, label, color in zip(tp_metric_names, tp_labels, tp_colors):
+            if metric_name in diff_absolute_metrics:
+                metric_data = diff_absolute_metrics[metric_name]
+                means, stds = [], []
+                for param1_val in param1_values:
+                    for param2_val in param2_values:
+                        values = metric_data.get((param1_val, param2_val), [])
+                        means.append(np.mean(values) if values else 0)
+                        stds.append(np.std(values) if values else 0)
+                
+                tp_data_dict[metric_name] = means
+                all_tp_means.extend(means)
+                all_tp_stds.extend(stds)
+                
+                ax3_top.errorbar(x_pos, means, yerr=stds,
+                            label=label, marker='o', capsize=3, 
+                            color=color, linestyle='-', 
+                            markersize=8, linewidth=2, 
+                            markerfacecolor=color, markeredgecolor=color, markeredgewidth=1)
+        
+        # Fill between red and blue in top subplot (blue > red = green, blue < red = red)
+        if 'tp_batch_rate' in tp_data_dict and 'tp_corrected_rate' in tp_data_dict:
+            red_means = np.array(tp_data_dict['tp_batch_rate'])
+            blue_means = np.array(tp_data_dict['tp_corrected_rate'])
+            ax3_top.fill_between(x_pos, red_means, blue_means, 
+                                where=(blue_means >= red_means), 
+                                color='green', alpha=0.2, interpolate=True, label='Improvement')
+            ax3_top.fill_between(x_pos, red_means, blue_means, 
+                                where=(blue_means < red_means), 
+                                color='red', alpha=0.2, interpolate=True, label='Degradation')
+        
+        # Estimate total glycans from the data
+        for combo_data in all_results.values():
+            if combo_data[param1_name] == param1_values[0] and combo_data[param2_name] == param2_values[0]:
+                json_files = glob.glob(f"{combo_data['output_dir']}/correction_metrics_seed*.json")
+                if json_files:
+                    with open(json_files[0], 'r') as f:
+                        metrics = json.load(f)
+                    diff_expr = metrics.get('correction_results', {}).get('differential_expression', {})
+                    all_glycans = set()
+                    all_glycans.update(diff_expr.get('Y_clean', {}).get('significant_glycans', []))
+                    all_glycans.update(diff_expr.get('Y_with_batch', {}).get('significant_glycans', []))
+                    all_glycans.update(diff_expr.get('Y_corrected', {}).get('significant_glycans', []))
+                    if all_glycans:
+                        total_glycans_estimate = max(all_glycans)
+                    break
+                break
+        
+        total_glycans_str = f", Total glycans: {total_glycans_estimate}" if total_glycans_estimate else ""
+        ax3_top.set_title('Differential Expression: True Positive Rates\n' +
+                         f'(Correctly identified / Ground Truth × 100{total_glycans_str})',
+                         fontweight='bold', fontsize=15)
+        ax3_top.set_ylabel('TP Rate (%)', fontsize=14, fontweight='bold')
+        ax3_top.set_xticks(x_pos)
+        ax3_top.set_xticklabels(combo_labels, rotation=45, ha='right', fontsize=11)
+        ax3_top.legend(loc='lower left', fontsize=11)
+        ax3_top.grid(True, alpha=0.3, zorder=0)
+        ax3_top.axhline(y=100, color='black', linestyle='--', alpha=0.5, linewidth=1)
+        
+        # Subplot 2 (bottom): False positive rates (2 lines)
+        fp_metric_names = ['fp_batch_rate', 'fp_corrected_rate']
+        fp_labels = ['Y_with_batch (Batch effect FP)', 'Y_corrected (After correction FP)']
+        fp_colors = ['#FF6347', '#4169E1']  # Red, Blue
+        
+        for metric_name, label, color in zip(fp_metric_names, fp_labels, fp_colors):
+            if metric_name in diff_absolute_metrics:
+                metric_data = diff_absolute_metrics[metric_name]
+                means, stds = [], []
+                for param1_val in param1_values:
+                    for param2_val in param2_values:
+                        values = metric_data.get((param1_val, param2_val), [])
+                        means.append(np.mean(values) if values else 0)
+                        stds.append(np.std(values) if values else 0)
+                
+                fp_data_dict[metric_name] = means
+                all_fp_means.extend(means)
+                all_fp_stds.extend(stds)
+                
+                ax3_bottom.errorbar(x_pos, means, yerr=stds,
+                            label=label, marker='o', capsize=3, 
+                            color=color, linestyle='-', 
+                            markersize=8, linewidth=2, 
+                            markerfacecolor=color, markeredgecolor=color, markeredgewidth=1)
+        
+        # Fill between red and blue in bottom subplot (blue < red = green, blue > red = red)
+        if 'fp_batch_rate' in fp_data_dict and 'fp_corrected_rate' in fp_data_dict:
+            red_means = np.array(fp_data_dict['fp_batch_rate'])
+            blue_means = np.array(fp_data_dict['fp_corrected_rate'])
+            ax3_bottom.fill_between(x_pos, red_means, blue_means, 
+                                   where=(blue_means <= red_means), 
+                                   color='green', alpha=0.2, interpolate=True, label='Improvement')
+            ax3_bottom.fill_between(x_pos, red_means, blue_means, 
+                                   where=(blue_means > red_means), 
+                                   color='red', alpha=0.2, interpolate=True, label='Degradation')
+        
+        ax3_bottom.set_title('Differential Expression: False Positive Rates\n' +
+                            f'(False positives / Total glycans × 100{total_glycans_str})',
+                            fontweight='bold', fontsize=15)
+        ax3_bottom.set_ylabel('FP Rate (%)', fontsize=14, fontweight='bold')
+        ax3_bottom.set_xlabel('Parameter Combinations', fontsize=14, fontweight='bold')
+        ax3_bottom.set_xticks(x_pos)
+        ax3_bottom.set_xticklabels(combo_labels, rotation=45, ha='right', fontsize=11)
+        ax3_bottom.legend(loc='upper left', fontsize=11)
+        ax3_bottom.grid(True, alpha=0.3, zorder=0)
+        
+        # Fixed y-axis range: 0-100%
+        ax3_top.set_ylim(0, 100)
+        ax3_bottom.set_ylim(0, 100)
         
         plt.tight_layout()
         if save_path:
-            save_path_3 = f'{save_path}3_differential_expression_change_metrics.png'
+            save_path_3 = f'{save_path}3_differential_expression_tp_fp_rates.png'
             plt.savefig(save_path_3, dpi=300, bbox_inches='tight')
             if verbose:
-                print(f"Differential expression metrics plot saved to: {save_path_3}")
+                print(f"Differential expression TP/FP rates plot saved to: {save_path_3}")
         plt.show()
-        plots_created.append('differential_expression_change_metrics')
+        plots_created.append('differential_expression_tp_fp_rates')
 
-        heatmap_targets = [
-            'recovery_overlap_change_rate',
-            'recovery_false_positive_change_rate'
-        ]
+        # Note: recovery_overlap_change_rate and recovery_false_positive_change_rate
+        # have been removed as they are redundant with summary change rates
+        heatmap_targets = []
         heatmap_targets = [m for m in heatmap_targets if m in diff_metrics]
 
         if heatmap_targets:
@@ -924,6 +940,180 @@ def plot_parameter_grid_metrics(all_results=None, results_dir="results", save_pa
             plt.show()
             plots_created.append('differential_expression_heatmaps')
     
+    # Figure 4: F1 Score comparison
+    if diff_metrics:
+        f1_metrics = {}
+        f1_data_dict = {}
+        for metric_name in ['batch_f1_score', 'corrected_f1_score']:
+            if metric_name in diff_metrics:
+                f1_metrics[metric_name] = diff_metrics[metric_name]
+        
+        if f1_metrics:
+            fig4, ax4 = plt.subplots(1, 1, figsize=(12, 8))
+            
+            for idx, (metric_name, metric_data) in enumerate(f1_metrics.items()):
+                means, stds = [], []
+                for param1_val in param1_values:
+                    for param2_val in param2_values:
+                        values = metric_data.get((param1_val, param2_val), [])
+                        means.append(np.mean(values) if values else 0)
+                        stds.append(np.std(values) if values else 0)
+                
+                f1_data_dict[metric_name] = means
+                
+                label = 'Y_with_batch' if 'batch' in metric_name else 'Y_corrected'
+                color = '#FF6347' if 'batch' in metric_name else '#4169E1'
+                
+                ax4.errorbar(x_pos, means, yerr=stds, label=label, marker='o', capsize=3,
+                            color=color, linestyle='-', markersize=8, linewidth=2,
+                            markerfacecolor=color, markeredgecolor=color, markeredgewidth=1)
+            
+            # Fill between red and blue (blue > red = improvement)
+            if 'batch_f1_score' in f1_data_dict and 'corrected_f1_score' in f1_data_dict:
+                red_means = np.array(f1_data_dict['batch_f1_score'])
+                blue_means = np.array(f1_data_dict['corrected_f1_score'])
+                ax4.fill_between(x_pos, red_means, blue_means, 
+                                where=(blue_means >= red_means), 
+                                color='green', alpha=0.2, interpolate=True, label='Improvement')
+                ax4.fill_between(x_pos, red_means, blue_means, 
+                                where=(blue_means < red_means), 
+                                color='red', alpha=0.2, interpolate=True, label='Degradation')
+            
+            ax4.set_title('F1 Score: Differential Expression Detection Quality\n(Harmonic mean of Precision and Recall)',
+                         fontweight='bold', fontsize=15)
+            ax4.set_ylabel('F1 Score', fontsize=14, fontweight='bold')
+            ax4.set_xlabel('Parameter Combinations', fontsize=14, fontweight='bold')
+            ax4.set_ylim(0, 1)
+            ax4.set_xticks(x_pos)
+            ax4.set_xticklabels(combo_labels, rotation=45, ha='right', fontsize=11)
+            ax4.legend(loc='lower left', fontsize=11)
+            ax4.grid(True, alpha=0.3, zorder=0)
+            
+            plt.tight_layout()
+            if save_path:
+                save_path_4 = f'{save_path}4_f1_score.png'
+                plt.savefig(save_path_4, dpi=300, bbox_inches='tight')
+                if verbose:
+                    print(f"F1 score plot saved to: {save_path_4}")
+            plt.show()
+            plots_created.append('f1_score')
+    
+    # Figure 5: Precision comparison
+    if diff_metrics:
+        precision_metrics = {}
+        precision_data_dict = {}
+        for metric_name in ['batch_precision', 'corrected_precision']:
+            if metric_name in diff_metrics:
+                precision_metrics[metric_name] = diff_metrics[metric_name]
+        
+        if precision_metrics:
+            fig5, ax5 = plt.subplots(1, 1, figsize=(12, 8))
+            
+            for idx, (metric_name, metric_data) in enumerate(precision_metrics.items()):
+                means, stds = [], []
+                for param1_val in param1_values:
+                    for param2_val in param2_values:
+                        values = metric_data.get((param1_val, param2_val), [])
+                        means.append(np.mean(values) if values else 0)
+                        stds.append(np.std(values) if values else 0)
+                
+                precision_data_dict[metric_name] = means
+                
+                label = 'Y_with_batch' if 'batch' in metric_name else 'Y_corrected'
+                color = '#FF6347' if 'batch' in metric_name else '#4169E1'
+                
+                ax5.errorbar(x_pos, means, yerr=stds, label=label, marker='o', capsize=3,
+                            color=color, linestyle='-', markersize=8, linewidth=2,
+                            markerfacecolor=color, markeredgecolor=color, markeredgewidth=1)
+            
+            # Fill between red and blue (blue > red = improvement)
+            if 'batch_precision' in precision_data_dict and 'corrected_precision' in precision_data_dict:
+                red_means = np.array(precision_data_dict['batch_precision'])
+                blue_means = np.array(precision_data_dict['corrected_precision'])
+                ax5.fill_between(x_pos, red_means, blue_means, 
+                                where=(blue_means >= red_means), 
+                                color='green', alpha=0.2, interpolate=True, label='Improvement')
+                ax5.fill_between(x_pos, red_means, blue_means, 
+                                where=(blue_means < red_means), 
+                                color='red', alpha=0.2, interpolate=True, label='Degradation')
+            
+            ax5.set_title('Precision: Correctness of Detected Signals\n(TP / (TP + FP))',
+                         fontweight='bold', fontsize=15)
+            ax5.set_ylabel('Precision', fontsize=14, fontweight='bold')
+            ax5.set_xlabel('Parameter Combinations', fontsize=14, fontweight='bold')
+            ax5.set_ylim(0, 1)
+            ax5.set_xticks(x_pos)
+            ax5.set_xticklabels(combo_labels, rotation=45, ha='right', fontsize=11)
+            ax5.legend(loc='lower left', fontsize=11)
+            ax5.grid(True, alpha=0.3, zorder=0)
+            
+            plt.tight_layout()
+            if save_path:
+                save_path_5 = f'{save_path}5_precision.png'
+                plt.savefig(save_path_5, dpi=300, bbox_inches='tight')
+                if verbose:
+                    print(f"Precision plot saved to: {save_path_5}")
+            plt.show()
+            plots_created.append('precision')
+    
+    # Figure 6: Recall comparison
+    if diff_metrics:
+        recall_metrics = {}
+        recall_data_dict = {}
+        for metric_name in ['batch_recall', 'corrected_recall']:
+            if metric_name in diff_metrics:
+                recall_metrics[metric_name] = diff_metrics[metric_name]
+        
+        if recall_metrics:
+            fig6, ax6 = plt.subplots(1, 1, figsize=(12, 8))
+            
+            for idx, (metric_name, metric_data) in enumerate(recall_metrics.items()):
+                means, stds = [], []
+                for param1_val in param1_values:
+                    for param2_val in param2_values:
+                        values = metric_data.get((param1_val, param2_val), [])
+                        means.append(np.mean(values) if values else 0)
+                        stds.append(np.std(values) if values else 0)
+                
+                recall_data_dict[metric_name] = means
+                
+                label = 'Y_with_batch' if 'batch' in metric_name else 'Y_corrected'
+                color = '#FF6347' if 'batch' in metric_name else '#4169E1'
+                
+                ax6.errorbar(x_pos, means, yerr=stds, label=label, marker='o', capsize=3,
+                            color=color, linestyle='-', markersize=8, linewidth=2,
+                            markerfacecolor=color, markeredgecolor=color, markeredgewidth=1)
+            
+            # Fill between red and blue (blue > red = improvement)
+            if 'batch_recall' in recall_data_dict and 'corrected_recall' in recall_data_dict:
+                red_means = np.array(recall_data_dict['batch_recall'])
+                blue_means = np.array(recall_data_dict['corrected_recall'])
+                ax6.fill_between(x_pos, red_means, blue_means, 
+                                where=(blue_means >= red_means), 
+                                color='green', alpha=0.2, interpolate=True, label='Improvement')
+                ax6.fill_between(x_pos, red_means, blue_means, 
+                                where=(blue_means < red_means), 
+                                color='red', alpha=0.2, interpolate=True, label='Degradation')
+            
+            ax6.set_title('Recall (Sensitivity): Coverage of True Signals\n(TP / (TP + FN))',
+                         fontweight='bold', fontsize=15)
+            ax6.set_ylabel('Recall', fontsize=14, fontweight='bold')
+            ax6.set_xlabel('Parameter Combinations', fontsize=14, fontweight='bold')
+            ax6.set_ylim(0, 1)
+            ax6.set_xticks(x_pos)
+            ax6.set_xticklabels(combo_labels, rotation=45, ha='right', fontsize=11)
+            ax6.legend(loc='lower left', fontsize=11)
+            ax6.grid(True, alpha=0.3, zorder=0)
+            
+            plt.tight_layout()
+            if save_path:
+                save_path_6 = f'{save_path}6_recall.png'
+                plt.savefig(save_path_6, dpi=300, bbox_inches='tight')
+                if verbose:
+                    print(f"Recall plot saved to: {save_path_6}")
+            plt.show()
+            plots_created.append('recall')
+    
     if verbose:
         print(f"Created {len(plots_created)} separate plots: {plots_created}")
     
@@ -942,7 +1132,7 @@ def compare_batch_correction_across_masks(mask_dirs, save_path=None, verbose=Tru
     all_mask_data = {}
     
     for mask_name, mask_dir in mask_dirs.items():
-        json_files = glob.glob(f"{mask_dir}/comprehensive_metrics_seed*.json")
+        json_files = glob.glob(f"{mask_dir}/correction_metrics_seed*.json")
         
         if not json_files:
             print(f"Warning: No JSON files found in {mask_dir}")
@@ -959,11 +1149,18 @@ def compare_batch_correction_across_masks(mask_dirs, save_path=None, verbose=Tru
             with open(json_file, 'r') as f:
                 data = json.load(f)
             
-            before_metrics = data['batch_effect_metrics']['before_correction']
-            after_metrics = data['batch_effect_metrics']['after_correction']
+            # Extract from new correction_metrics format
+            before_metrics = data['correction_results']['batch_correction']['before']
+            after_metrics = data['correction_results']['batch_correction']['after']
             
             changes = calculate_batch_correction_changes(before_metrics, after_metrics)
-            preservation = calculate_biological_preservation(after_metrics)
+            
+            # Extract bio preservation from new format
+            bio_preservation = data['correction_results']['bio_preservation']
+            preservation = {}
+            for metric_name, value in bio_preservation.items():
+                if isinstance(value, (int, float)):
+                    preservation[metric_name] = value * 100  # Convert to percentage
             
             change_metrics_list.append(changes)
             preservation_metrics_list.append(preservation)
@@ -1109,7 +1306,7 @@ def compare_differential_expression_across_masks(mask_dirs, save_path=None, verb
     all_mask_de_data = {}
     
     for mask_name, mask_dir in mask_dirs.items():
-        json_files = glob.glob(f"{mask_dir}/comprehensive_metrics_seed*.json")
+        json_files = glob.glob(f"{mask_dir}/correction_metrics_seed*.json")
         
         if not json_files:
             print(f"Warning: No JSON files found in {mask_dir}")
@@ -1120,40 +1317,49 @@ def compare_differential_expression_across_masks(mask_dirs, save_path=None, verb
         
         # Collect metrics across seeds
         metrics_dict = {
-            'recovery_overlap_change_rate': [],
-            'recovery_false_positive_change_rate': [],
-            'overlap_1v2_rate': [],
-            'overlap_1v3_rate': [],
-            'fp_1v2_rate': [],
-            'fp_1v3_rate': []
+            'true_positive_change_pct': [],
+            'false_positive_change_pct': [],
+            'batch_tp_rate': [],
+            'corrected_tp_rate': [],
+            'batch_fp_rate': [],
+            'corrected_fp_rate': []
         }
         
         for json_file in json_files:
             with open(json_file, 'r') as f:
                 data = json.load(f)
             
-            diff_data = data['differential_expression']
+            # Extract from new correction_metrics format
+            diff_expr = data['correction_results']['differential_expression']
             
-            metrics_dict['recovery_overlap_change_rate'].append(
-                diff_data['results']['overall']['recovery_overlap_change_rate'])
-            metrics_dict['recovery_false_positive_change_rate'].append(
-                diff_data['results']['overall']['recovery_false_positive_change_rate'])
-            metrics_dict['overlap_1v2_rate'].append(
-                diff_data['results']['compare_1v2']['batch_effect_errors']['overlap_rate'])
-            metrics_dict['overlap_1v3_rate'].append(
-                diff_data['results']['compare_1v3']['after_correction_errors']['overlap_rate'])
+            # Get summary metrics
+            summary = diff_expr['summary']
+            metrics_dict['true_positive_change_pct'].append(summary['true_positive_change_pct'])
+            metrics_dict['false_positive_change_pct'].append(summary['false_positive_change_pct'])
             
-            dataset1_sig_count = diff_data['results']['dataset1']['significant_count']
-            gained_1v2_count = diff_data['results']['compare_1v2']['batch_effect_errors']['gained_counts']
-            gained_1v3_count = diff_data['results']['compare_1v3']['after_correction_errors']['gained_counts']
+            # Calculate TP rates (true positive rates)
+            y_clean_count = diff_expr['Y_clean']['significant_count']
+            batch_tp_count = diff_expr['Y_with_batch']['true_positive']['count']
+            corrected_tp_count = diff_expr['Y_after_correction']['true_positive']['count']
             
-            # Avoid division by zero
-            if dataset1_sig_count > 0:
-                metrics_dict['fp_1v2_rate'].append(gained_1v2_count / dataset1_sig_count * 100)
-                metrics_dict['fp_1v3_rate'].append(gained_1v3_count / dataset1_sig_count * 100)
+            if y_clean_count > 0:
+                metrics_dict['batch_tp_rate'].append(batch_tp_count / y_clean_count * 100)
+                metrics_dict['corrected_tp_rate'].append(corrected_tp_count / y_clean_count * 100)
             else:
-                metrics_dict['fp_1v2_rate'].append(0.0)
-                metrics_dict['fp_1v3_rate'].append(0.0)
+                metrics_dict['batch_tp_rate'].append(0.0)
+                metrics_dict['corrected_tp_rate'].append(0.0)
+            
+            # Calculate FP rates relative to total glycans
+            all_glycans = set(diff_expr['Y_clean']['significant_glycans']) | \
+                         set(diff_expr['Y_with_batch']['significant_glycans']) | \
+                         set(diff_expr['Y_corrected']['significant_glycans'])
+            total_glycans = max(all_glycans) if all_glycans else 98
+            
+            batch_fp_count = diff_expr['Y_with_batch']['false_positive']['count']
+            corrected_fp_count = diff_expr['Y_after_correction']['false_positive']['count']
+            
+            metrics_dict['batch_fp_rate'].append(batch_fp_count / total_glycans * 100)
+            metrics_dict['corrected_fp_rate'].append(corrected_fp_count / total_glycans * 100)
         
         # Calculate summary statistics
         summary = {}
@@ -1172,21 +1378,21 @@ def compare_differential_expression_across_masks(mask_dirs, save_path=None, verb
     
     # Define metrics and their display names
     metric_names = [
-        'recovery_overlap_change_rate',
-        'recovery_false_positive_change_rate',
-        'overlap_1v2_rate',
-        'overlap_1v3_rate',
-        'fp_1v2_rate',
-        'fp_1v3_rate'
+        'true_positive_change_pct',
+        'false_positive_change_pct',
+        'batch_tp_rate',
+        'corrected_tp_rate',
+        'batch_fp_rate',
+        'corrected_fp_rate'
     ]
     
     metric_display_names = {
-        'recovery_overlap_change_rate': 'Recovery Overlap\nChange Rate (%)',
-        'recovery_false_positive_change_rate': 'Recovery FP\nChange Rate (%)',
-        'overlap_1v2_rate': '1v2 Overlap\nRate (%)',
-        'overlap_1v3_rate': '1v3 Overlap\nRate (%)',
-        'fp_1v2_rate': '1v2 FP\nRate (%)',
-        'fp_1v3_rate': '1v3 FP\nRate (%)'
+        'true_positive_change_pct': 'TP Change\n(%)',
+        'false_positive_change_pct': 'FP Change\n(%)',
+        'batch_tp_rate': 'Batch\nTP Rate (%)',
+        'corrected_tp_rate': 'Corrected\nTP Rate (%)',
+        'batch_fp_rate': 'Batch\nFP Rate (%)',
+        'corrected_fp_rate': 'Corrected\nFP Rate (%)'
     }
     
     mask_names = list(mask_dirs.keys())
@@ -1215,7 +1421,7 @@ def compare_differential_expression_across_masks(mask_dirs, save_path=None, verb
                    ha='center', va='bottom' if height >= 0 else 'top', 
                    fontsize=9)
     
-    ax.set_title('Differential Expression Recovery Across Mask Configurations \n(1=Clean, 2=With BE, 3=After Correction)\n', fontsize=15)
+    ax.set_title('Differential Expression Recovery Across Mask Configurations\n(Batch vs Corrected Comparison)\n', fontsize=15)
     ax.set_xticks(x_pos)
     ax.set_xticklabels([metric_display_names[m] for m in metric_names], fontsize=11)
     ax.set_ylabel('Percentage (%)', fontsize=14)

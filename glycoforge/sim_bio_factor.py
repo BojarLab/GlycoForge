@@ -1,5 +1,5 @@
 import numpy as np
-from utils import clr, invclr
+from .utils import clr, invclr
 from scipy.stats import dirichlet
 
 
@@ -60,105 +60,97 @@ def generate_alpha_U(alpha_H,
     alpha_U = np.clip(alpha_U, 1e-3, None)
     return alpha_U, delta
 
-def robust_effect_size_processing(effect_sizes, bio_strength=1.0, max_fold_change=10.0, scaling_strategy="clip", verbose=False):
+def robust_effect_size_processing(effect_sizes, 
+                                  winsorize_percentile=None, baseline_method="median", verbose=False):
     """
-    Robust effect size processing pipeline with fold-change safety limits.
+    Robust effect size processing with Winsorization and baseline scaling.
+    
+    Approach: Centering → Winsorization (always enabled) → Baseline normalization
+    Returns normalized effect sizes that caller should scale by bio_strength.
     
     Parameters:
     -----------
     effect_sizes : array-like
         Raw Cohen's d effect sizes.
-    bio_strength : float
-        Scaling factor for biological signal strength.
-    max_fold_change : float
-        Maximum allowed fold change (ratio) for any feature.
-        Converted to CLR limit via ln(max_fold_change).
-    scaling_strategy : str, "clip" or "scale"
-        - "clip": Cap individual features that exceed the limit (preserves others).
-        - "scale": Scale down ALL features if any exceeds limit (preserves ratios).
+    winsorize_percentile : float or None
+        Percentile for Winsorization (e.g., 95 = clip to 95th percentile).
+        If None, automatically determined based on outlier severity (85th-99th).
+    baseline_method : str
+        Method to calculate baseline: "median", "mad", or "p75".
+    verbose : bool
+        Print diagnostic information.
+    
+    Returns:
+    --------
+    d_normalized : array-like
+        Normalized effect sizes (baseline-scaled).
+        Caller should multiply by bio_strength to get final injection magnitude.
     """
     effect_sizes = np.array(effect_sizes)
     
     if verbose:
-        print(f"  [Debug] Input effect sizes: range=[{np.min(effect_sizes):.3f}, {np.max(effect_sizes):.3f}], mean={np.mean(effect_sizes):.3f}, std={np.std(effect_sizes):.3f}")
-
-    # Step 1: Center (Required for CLR additivity)
-    # We removed standardization and tanh to keep the logic simple and intuitive.
-    # Centering ensures that the geometric mean of the changes is 1 (sum in CLR is 0).
-    processed = effect_sizes - np.mean(effect_sizes)
+        print(f"  [Input] range=[{np.min(effect_sizes):.3f}, {np.max(effect_sizes):.3f}], "
+              f"mean={np.mean(effect_sizes):.3f}, median|·|={np.median(np.abs(effect_sizes)):.3f}")
     
-    # Step 2: Calculate Raw Injection
-    raw_injection = processed * bio_strength
+    # Step 1: Centering
+    d_centered = effect_sizes - np.mean(effect_sizes)
     
-    # Step 3: Apply Safety Limits based on Max Fold Change
-    # Limit in CLR space = ln(max_fold_change)
-    limit = np.log(max_fold_change)
-    max_val = np.max(np.abs(raw_injection))
-    
-    final_injection = raw_injection.copy()
-    
-    if max_val > limit:
-        if verbose:
-            print(f"  [Warning] Max injection ({max_val:.2f}) exceeds limit ({limit:.2f} = {max_fold_change}x fold change).")
-            
-        if scaling_strategy == "scale":
-            # Strategy 1: Global Scaling
-            scale_factor = limit / max_val
-            final_injection = raw_injection * scale_factor
-            if verbose:
-                print(f"  -> Strategy 'scale': All effects scaled down by factor {scale_factor:.3f} to preserve relative ratios.")
-                
-        elif scaling_strategy == "clip":
-            # Strategy 2: Local Clipping (Default)
-            final_injection = np.clip(raw_injection, -limit, limit)
-            n_clipped = np.sum(np.abs(raw_injection) > limit)
-            if verbose:
-                print(f"  -> Strategy 'clip': {n_clipped} features clipped to limit. Others unchanged.")
-                print(f"  -> Tip: Use scaling_strategy='scale' if you want to preserve relative effect sizes.")
-    else:
-        if verbose:
-            print(f"  [Debug] Injection within limits (max={max_val:.2f} < limit={limit:.2f}). No scaling needed.")
-            
-    # Return the FINAL INJECTION vector, not just the processed effect sizes
-    # Note: The calling function expects "d_robust", which it then multiplies by bio_strength.
-    # To maintain compatibility, we return final_injection / bio_strength
-    # so that: (final_injection / bio_strength) * bio_strength = final_injection
-    
-    if abs(bio_strength) > 1e-9:
-        return final_injection / bio_strength
-    else:
-        return np.zeros_like(final_injection)
-
-#  handle NaN in CLR data
-def add_noise_to_zero_variance_features(data, #glycans x samples
-                                        noise_level=1e-6,  #Relative noise magnitude based on the row mean.
-                                        random_seed=42):
-    rng = np.random.default_rng(random_seed)
-    data_with_noise = data.copy()
-    
-    for glycan_idx in range(data.shape[0]):
-        row_values = data.iloc[glycan_idx, :].values
+    # Step 2: Winsorization (always enabled)
+    # Auto-select percentile based on outlier severity
+    if winsorize_percentile is None:
+        q75, q25 = np.percentile(np.abs(d_centered), [75, 25])
+        iqr = q75 - q25
+        max_abs = np.max(np.abs(d_centered))
+        outlier_ratio = max_abs / (q75 + 1e-10)
         
-        # Detect zero-variance features (within floating-point precision)
-        if np.std(row_values) < 1e-12:
-            # Determine noise amplitude relative to the row mean
-            row_mean = np.mean(row_values)
-            if row_mean > 0:
-                noise_amplitude = row_mean * noise_level
-            else:
-                noise_amplitude = noise_level  # Absolute noise if mean is zero
-            
-            # Add independent random noise to each sample
-            noise = rng.normal(0, noise_amplitude, len(row_values))
-            data_with_noise.iloc[glycan_idx, :] += noise
-            
-            # Ensure all values remain positive
-            data_with_noise.iloc[glycan_idx, :] = np.maximum(
-                data_with_noise.iloc[glycan_idx, :], 
-                noise_level  # Minimum safeguard value
-            )
+        if outlier_ratio > 15:
+            winsorize_percentile = 85
+        elif outlier_ratio > 10:
+            winsorize_percentile = 90
+        elif outlier_ratio > 5:
+            winsorize_percentile = 95
+        else:
+            winsorize_percentile = 99
+        
+        if verbose:
+            print(f"  [Winsorize] Auto-selected {winsorize_percentile}th percentile (outlier_ratio={outlier_ratio:.2f})")
     
-    return data_with_noise
+    lower = np.percentile(d_centered, 100 - winsorize_percentile)
+    upper = np.percentile(d_centered, winsorize_percentile)
+    d_winsorized = np.clip(d_centered, lower, upper)
+    
+    if verbose:
+        n_clipped = np.sum((d_centered < lower) | (d_centered > upper))
+        print(f"  [Winsorize] Clipped {n_clipped}/{len(d_centered)} values ({n_clipped/len(d_centered)*100:.1f}%)")
+        print(f"  [Winsorize] Before: median|·|={np.median(np.abs(d_centered)):.3f}, max|·|={np.max(np.abs(d_centered)):.3f}")
+        print(f"  [Winsorize] After:  median|·|={np.median(np.abs(d_winsorized)):.3f}, max|·|={np.max(np.abs(d_winsorized)):.3f}")
+    
+    # Step 3: Calculate baseline
+    if baseline_method == "median":
+        baseline = np.median(np.abs(d_winsorized))
+    elif baseline_method == "mad":
+        mad = np.median(np.abs(d_winsorized - np.median(d_winsorized)))
+        baseline = mad * 1.4826 if mad > 1e-10 else 1.0
+    elif baseline_method == "p75":
+        baseline = np.percentile(np.abs(d_winsorized), 75)
+    else:
+        raise ValueError(f"Unknown baseline_method: {baseline_method}")
+    
+    if baseline < 1e-6:
+        baseline = 1.0
+    
+    if verbose:
+        print(f"  [Baseline] method={baseline_method}, value={baseline:.3f}")
+    
+    # Step 4: Normalize to baseline
+    d_normalized = d_winsorized / baseline
+    
+    if verbose:
+        print(f"  [Normalized] median|·|={np.median(np.abs(d_normalized)):.3f}, max|·|={np.max(np.abs(d_normalized)):.3f}")
+    
+    # Return normalized effect sizes (caller will multiply by bio_strength)
+    return d_normalized
+
 
 
 
@@ -168,8 +160,8 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
                                            bio_strength=1.0, # float Biological effect scaling parameter 'lambda'.
                                            k_dir=100, # float Dirichlet concentration parameter for Healthy group.
                                            variance_ratio=1.0, # float Unhealthy variance / Healthy variance.
-                                           max_fold_change=10.0, # float Maximum allowed fold change (ratio).
-                                           scaling_strategy="clip", # str "clip" or "scale".
+                                           winsorize_percentile=None, # float or None Percentile for Winsorization (auto if None).
+                                           baseline_method="median", # str Baseline calculation method: "median", "mad", or "p75".
                                            min_alpha=0.5, # float Minimum alpha value to avoid zero parameters.
                                            max_alpha=None, # float or None Maximum alpha value to prevent extreme concentrations.
                                            verbose=True):
@@ -223,13 +215,12 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
     z_h = clr(p_h)
     
     # Step 3: Robust effect size processing
-    # We use standardize=False to preserve the relative magnitude of real effect sizes,
-    # only centering and clipping them to avoid numerical instability.
+    # Winsorization is ALWAYS enabled (controlled by winsorize_percentile).
+    # If winsorize_percentile=None, auto-selects percentile based on outlier ratio.
     d_robust = robust_effect_size_processing(
         effect_sizes, 
-        bio_strength=bio_strength,
-        max_fold_change=max_fold_change,
-        scaling_strategy=scaling_strategy,
+        winsorize_percentile=winsorize_percentile,
+        baseline_method=baseline_method,
         verbose=verbose
     )
     
@@ -243,11 +234,11 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
     # Note: We do NOT multiply by feature sigma here because in high-sparsity data,
     # sigma can be artificially large (due to imputation of zeros), leading to exploded values.
     # Treating d_robust as direct CLR increments is a safer approximation.
-    z_u = z_h + differential_mask * bio_strength * d_robust
+    injection = differential_mask * bio_strength * d_robust  # Define injection BEFORE verbose block
+    z_u = z_h + injection
     
     if verbose:
-        # Calculate injection for debug
-        injection = differential_mask * bio_strength * d_robust
+        # Calculate effect magnitude for reporting
         effect_magnitude = np.abs(injection)
         print(f"[define_dirichlet_params_from_real_data] Injected effect magnitude (CLR units): mean={np.mean(effect_magnitude[differential_mask > 0]):.3f}, max={np.max(effect_magnitude):.3f}")
     
@@ -301,7 +292,18 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
                 print(f"  Clipped: {clipped_h} alpha_H, {clipped_u} alpha_U values to max_alpha={max_alpha}")
         print(f"{'='*60}\n")
     
-    return alpha_H, alpha_U
+    # Prepare debug info dictionary for metadata
+    debug_info = {
+        'raw_effect_sizes': effect_sizes.tolist(),
+        'd_robust': d_robust.tolist(),
+        'injection': injection.tolist(),
+        'p_h': p_h.tolist(),
+        'p_u': p_u.tolist(),
+        'z_h': z_h.tolist(),
+        'z_u': z_u.tolist()
+    }
+    
+    return alpha_H, alpha_U, debug_info
 
 
 def simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed=None, verbose=True):
@@ -341,9 +343,9 @@ def define_differential_mask(mask_input, n_glycans, effect_sizes=None, significa
             if verbose: print("[Mask] Mode: All (all ones)")
             return np.ones(n_glycans)
         
-        if mode in ["significant", "de-based"]:
-            if significant_mask is None: raise ValueError("'DE' mode requires significant_mask from analysis")
-            if verbose: print(f"[Mask] Mode: DE-based ({int(np.sum(significant_mask))} features)")
+        if mode in ["significant"]:
+            if significant_mask is None: raise ValueError("'Significant' mode requires significant_mask from analysis")
+            if verbose: print(f"[Mask] Mode: Significant ({int(np.sum(significant_mask))} features)")
             return np.asarray(significant_mask, dtype=float)
             
         if mode.startswith("top-"):

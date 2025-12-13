@@ -3,12 +3,9 @@ import numpy as np
 import pandas as pd
 import os
 import json
-
-from plot import plot_pca
-from sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_dirichlet_params_from_real_data, define_differential_mask
-from sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
-from utils import clr
-from metrics import check_batch_effect
+from .sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_dirichlet_params_from_real_data, define_differential_mask
+from .sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
+from .utils import clr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork
 
 
 def simulate(
@@ -29,8 +26,8 @@ def simulate(
     overlap_prob=0.5,
     kappa_mu=1.0,
     var_b=0.5,
-    max_fold_change=3.0,
-    scaling_strategy="clip",
+    winsorize_percentile=None,
+    baseline_method="median",
     u_dict=None,
     random_seeds=[42],
     output_dir="results/",
@@ -48,8 +45,8 @@ def simulate(
         'bio_strength': bio_strength,
         'k_dir': k_dir,
         'variance_ratio': variance_ratio,
-        'max_fold_change': max_fold_change,
-        'scaling_strategy': scaling_strategy
+        'winsorize_percentile': winsorize_percentile,
+        'baseline_method': baseline_method
     }
     
     # Identify which parameters are lists/tuples (requiring grid search)
@@ -106,8 +103,8 @@ def simulate(
                 'overlap_prob': overlap_prob,
                 'kappa_mu': kappa_mu,
                 'var_b': var_b,
-                'max_fold_change': max_fold_change,
-                'scaling_strategy': scaling_strategy,
+                'winsorize_percentile': winsorize_percentile,
+                'baseline_method': baseline_method,
                 'u_dict': u_dict,
                 'random_seeds': random_seeds,
                 'output_dir': sub_dir,
@@ -157,13 +154,15 @@ def simulate(
         print("=" * 60)
     
     # Step 1: Prepare alpha_H based on data source
+    bio_debug_info = None  # Initialize debug info storage
+    
     if data_source == "simulated":
         alpha_H = np.ones(n_glycans) * 10
         real_effect_sizes = None
         alpha_U_base = None  # Will generate synthetically in loop
         
     elif data_source == "real":
-        df = pd.read_csv(data_file)
+        df = load_data_from_glycowork(data_file)
         
         # Get column prefixes (with defaults)
         if column_prefix is None:
@@ -203,52 +202,48 @@ def simulate(
                 
         if verbose:
             print(f"[Real Data] Applied jitter to zero values to prevent zero-variance issues")
+            print(f"[Real Data] Calling get_differential_expression with:")
+            print(f"  - group1 (disease/unhealthy): {len(bm_cols)} samples (expected: {unhealthy_prefix})")
+            print(f"    → {bm_cols[:min(3, len(bm_cols))]}...")
+            print(f"  - group2 (control/healthy): {len(r7_cols)} samples (expected: {healthy_prefix})")
+            print(f"    → {r7_cols[:min(3, len(r7_cols))]}...")
+            print(f"  - transform='CLR', impute=True")
+            print(f"  ⚠️  Effect size convention: positive = upregulated in disease")
         
+        # Convention: group1 = disease/unhealthy (BM), group2 = control/healthy (R7)
+        # This ensures positive effect sizes indicate upregulation in disease
         results = get_differential_expression(
             df_processed, 
-            group1=r7_cols,
-            group2=bm_cols,
+            group1=bm_cols,
+            group2=r7_cols,
             transform="CLR",
             impute=True
         )
         
-        # Reindex effect sizes to match input glycan order
-        # get_differential_expression may filter out some glycans, causing length mismatch
-        if 'glycan' in df.columns:
-            glycan_order = df['glycan'].astype(str).tolist()
+        # Handle cases where glycowork filters out some glycans or returns NaN
+        # Create aligned effect size array matching original glycan order
+        if len(results) != n_glycans_real:
+            if verbose:
+                print(f"[Real Data] Warning: get_differential_expression returned {len(results)} rows, expected {n_glycans_real}")
+                print(f"[Real Data] Aligning effect sizes using index mapping, filling missing with 0.0")
+            
+            # Initialize with zeros for all glycans
+            aligned_effect_sizes = np.zeros(n_glycans_real)
+            aligned_significant = np.zeros(n_glycans_real, dtype=bool)  # Also align significant mask
+            
+            # Map results back to original positions using DataFrame index
+            for idx, (effect_size, significant) in enumerate(zip(results['Effect size'], results.get('significant', [False] * len(results)))):
+                original_idx = results.index[idx]
+                if original_idx < n_glycans_real:
+                    aligned_effect_sizes[original_idx] = effect_size if not pd.isna(effect_size) else 0.0
+                    aligned_significant[original_idx] = significant if not pd.isna(significant) else False
+            
+            real_effect_sizes = aligned_effect_sizes.tolist()
+            significant_mask = aligned_significant
         else:
-            glycan_order = df.index.astype(str).tolist()
-        
-        # Convert results to indexed Series for alignment
-        if 'glycan' in results.columns:
-            effect_series = results.set_index('glycan')['Effect size']
-            if 'significant' in results.columns:
-                significant_series = results.set_index('glycan')['significant']
-            else:
-                significant_series = None
-        else:
-            effect_series = results['Effect size']
-            if 'significant' in results.columns:
-                significant_series = results['significant']
-            else:
-                significant_series = None
-        
-        # Reindex to full glycan list, fill missing with 0.0 (no effect injected)
-        effect_series_full = effect_series.reindex(glycan_order).fillna(0.0)
-        real_effect_sizes = effect_series_full.values
-        
-        if significant_series is not None:
-            significant_full = significant_series.reindex(glycan_order).fillna(False)
-            significant_mask_aligned = significant_full.values
-        else:
-            significant_mask_aligned = None
-        
-        if verbose:
-            n_original = len(effect_series)
-            n_full = len(real_effect_sizes)
-            n_missing = n_full - n_original
-            if n_missing > 0:
-                print(f"[Real Data] Reindexed effect sizes: {n_original} → {n_full} glycans ({n_missing} missing filled with 0.0)")
+            # Normal case: lengths match, just handle NaN
+            real_effect_sizes = results['Effect size'].fillna(0.0).tolist()
+            significant_mask = results['significant'].values if 'significant' in results.columns else None
         
         if use_real_effect_sizes:
             # Extract healthy baseline from mean of all healthy samples
@@ -264,11 +259,12 @@ def simulate(
             p_h = healthy_ref / np.sum(healthy_ref)
             
             # Resolve differential_mask using helper
+            # Use aligned significant_mask that matches n_glycans_real
             differential_mask = define_differential_mask(
                 differential_mask, 
                 n_glycans=len(p_h),
                 effect_sizes=real_effect_sizes,
-                significant_mask=significant_mask_aligned,
+                significant_mask=significant_mask,  # Already aligned above
                 verbose=verbose
             )
             
@@ -277,15 +273,15 @@ def simulate(
                 print(f"[Real Data] {n_differential}/{len(differential_mask)} glycans will have effects injected")
             
             # Call new function with real effect sizes via CLR-space injection
-            alpha_H, alpha_U_base = define_dirichlet_params_from_real_data(
+            alpha_H, alpha_U_base, bio_debug_info = define_dirichlet_params_from_real_data(
                 p_h=p_h,
                 effect_sizes=real_effect_sizes,
                 differential_mask=differential_mask,
-                bio_strength=bio_strength,  # Use user-specified value directly
+                bio_strength=bio_strength,
                 k_dir=k_dir,
                 variance_ratio=variance_ratio,
-                max_fold_change=max_fold_change, # Use user-specified value
-                scaling_strategy=scaling_strategy, # Use user-specified value
+                winsorize_percentile=winsorize_percentile,
+                baseline_method=baseline_method,
                 min_alpha=0.5,
                 max_alpha=None,
                 verbose=verbose
@@ -304,6 +300,18 @@ def simulate(
             n_glycans = n_glycans_real
             alpha_H = np.ones(n_glycans) * 10
             alpha_U_base = None  # Will generate synthetically in loop
+        
+        # Quick check: Original real data bio effect (only in hybrid mode)
+        original_data_bio_check = None
+        if use_real_effect_sizes:
+            bio_labels_real = [0] * len(r7_cols) + [1] * len(bm_cols)
+            real_data_values = df[r7_cols + bm_cols].values.T
+            real_data_clr = clr(real_data_values).T
+            real_data_clr_df = pd.DataFrame(real_data_clr, columns=r7_cols + bm_cols)
+            original_data_bio_check, _ = check_bio_effect(
+                real_data_clr_df, bio_labels_real, 
+                stage_name="Original Real Data", verbose=verbose
+            )
         
         if verbose:
             print(f"Loaded real data: {len(r7_cols)} healthy, {len(bm_cols)} unhealthy")
@@ -364,6 +372,30 @@ def simulate(
             Y_clean.to_csv(f"{output_dir}/1_Y_clean_seed{seed}.csv", float_format="%.32f")
             Y_clean_clr.to_csv(f"{output_dir}/1_Y_clean_clr_seed{seed}.csv", float_format="%.32f")
         
+        # Quick check: Simulated clean data bio effect (all modes)
+        bio_labels_sim = [0] * n_H + [1] * n_U
+        Y_clean_bio_check, _ = check_bio_effect(
+            Y_clean_clr, bio_labels_sim, 
+            stage_name="Simulated Clean Data (Y_clean)", verbose=verbose
+        )
+        
+        # Show injection success summary (only in hybrid mode with verbose)
+        if use_real_effect_sizes and verbose:
+            print("\n" + "=" * 60)
+            print("  BIO INJECTION SUCCESS CHECK")
+            print("=" * 60)
+            if bio_debug_info is not None:
+                injection = np.array(bio_debug_info['injection'])
+                n_injected = np.sum(injection != 0)
+                print(f"  Injected {n_injected}/{n_glycans} glycans")
+                print(f"  Injection range: [{injection.min():.2f}, {injection.max():.2f}] CLR units")
+                if original_data_bio_check is not None:
+                    orig_eta = original_data_bio_check['bio_effect']['effect_size_eta2']
+                    sim_eta = Y_clean_bio_check['bio_effect']['effect_size_eta2']
+                    print(f"  Original data eta²: {orig_eta:.1%} → Simulated data eta²: {sim_eta:.1%}")
+                    print(f"  Enhancement: {sim_eta/orig_eta:.2f}× stronger" if orig_eta > 0 else "")
+            print("=" * 60 + "\n")
+        
         # Step 4: Apply batch effects
         batch_groups, batch_labels = stratified_batches_from_columns(
             Y_clean_clr.columns, 
@@ -416,27 +448,63 @@ def simulate(
         batch_groups_serializable = {k: list(v) for k, v in batch_groups.items()}
         bio_groups_serializable = {k: list(v) for k, v in bio_groups.items()}
         
-        # Construct key_parameters
-        key_parameters = {
+        # Construct bio_parameters
+        bio_parameters = {
             'n_H': n_H,
             'n_U': n_U,
             'bio_strength': bio_strength,
             'k_dir': k_dir,
-            'variance_ratio': variance_ratio,
             'k_dir_H': k_dir,
             'k_dir_U': k_dir / variance_ratio,
+            'variance_ratio': variance_ratio,
+            'differential_mask_config': differential_mask_config if isinstance(differential_mask_config, (str, type(None))) else "Custom Array"
+        }
+        
+        if data_source == "real":
+            bio_parameters['differential_mask_sum'] = int(differential_mask.sum()) if differential_mask is not None else 0
+        
+        # Construct batch_parameters
+        batch_parameters = {
+            'n_batches': n_batches,
             'kappa_mu': kappa_mu,
             'var_b': var_b,
             'affected_fraction': list(affected_fraction) if isinstance(affected_fraction, tuple) else affected_fraction,
             'positive_prob': positive_prob,
             'overlap_prob': overlap_prob,
-            'differential_mask_config': differential_mask_config if isinstance(differential_mask_config, (str, type(None))) else "Custom Array"
+            'sigma_mean': float(np.mean(sigma)),
+            'sigma_std': float(np.std(sigma))
         }
         
-        if data_source == "real":
-            key_parameters['differential_mask_sum'] = int(differential_mask.sum()) if differential_mask is not None else 0
-
-        # Construct metadata with ordered keys
+        # Construct quality_checks (in data processing order)
+        quality_checks = {}
+        
+        # Step 1: Original data check (only for hybrid mode)
+        if use_real_effect_sizes and original_data_bio_check is not None:
+            quality_checks['original_data'] = original_data_bio_check
+        
+        # Step 2: Y_clean check (all modes)
+        if Y_clean_bio_check is not None:
+            quality_checks['Y_clean'] = Y_clean_bio_check
+        
+        # Step 3: Y_with_batch check (all modes)
+        quality_checks['Y_with_batch'] = check_batch_effect_results
+        
+        # Construct dirichlet_parameters
+        dirichlet_parameters = {
+            'alpha_H': alpha_H.tolist(),
+            'alpha_U': alpha_U.tolist(),
+            'differential_mask': differential_mask.tolist() if differential_mask is not None and hasattr(differential_mask, 'tolist') else None
+        }
+        
+        # Construct sample_info
+        sample_info = {
+            'bio_labels': bio_labels.tolist(),
+            'batch_labels': batch_labels.tolist(),
+            'bio_groups': bio_groups_serializable,
+            'batch_groups': batch_groups_serializable
+        }
+        
+        # Construct metadata with new structure
         metadata = {
             'seed': seed,
             'data_source': data_source,
@@ -449,26 +517,42 @@ def simulate(
         metadata.update({
             'n_glycans': n_glycans,
             'n_samples': n_H + n_U,
-            'n_batches': n_batches,
-            'key_parameters': key_parameters,
-            'quickly_check_batch_effect': check_batch_effect_results,
-            'data_info': {
-                'bio_labels': bio_labels.tolist(),
-                'batch_labels': batch_labels.tolist(),
-                'bio_groups': bio_groups_serializable,
-                'alpha_H': alpha_H.tolist(),
-                'alpha_U': alpha_U.tolist(),
-                'differential_mask_values': differential_mask.tolist() if differential_mask is not None and hasattr(differential_mask, 'tolist') else None
-            },
-            'detailed_batch_info': {
-                'u_dict_keys': list(u_dict.keys()),
-                'u_dict': {k: v.tolist() for k, v in u_dict.items()},  # Save full u_dict
-                'affected_glycans_per_batch': {k: len(v) for k, v in u_dict.items()},
-                'batch_groups': batch_groups_serializable,
-                'sigma_mean': float(np.mean(sigma)),
-                'sigma_std': float(np.std(sigma))
-            }
+            'bio_parameters': bio_parameters,
+            'batch_parameters': batch_parameters,
+            'quality_checks': quality_checks,
+            'dirichlet_parameters': dirichlet_parameters,
+            'sample_info': sample_info
         })
+        
+        # Add data processing information for transparency and debugging
+        if data_source == "real":
+            # Get prefix info (handle both dict and None cases)
+            prefix_config = column_prefix if column_prefix is not None else {}
+            healthy_prefix_used = prefix_config.get('healthy', 'R7')
+            unhealthy_prefix_used = prefix_config.get('unhealthy', 'BM')
+            
+            metadata['differential_expression_config'] = {
+                'jitter_applied': True,
+                'jitter_range': [1e-6, 1.1e-6],
+                'differential_expression_config': {
+                    'group1_type': 'disease',
+                    'group1_prefix': unhealthy_prefix_used,
+                    'group2_type': 'control',
+                    'group2_prefix': healthy_prefix_used,
+                    'transform': 'CLR',
+                    'impute': True,
+                    'convention': 'positive effect size = upregulated in disease (group1 > group2)'
+                } if use_real_effect_sizes else None
+            }
+        
+        # Add debug info (optional, only in hybrid mode)
+        if bio_debug_info is not None:
+            metadata['bio_injection_debug'] = bio_debug_info
+        
+        metadata['batch_injection_debug'] = {
+            'u_dict': {k: v.tolist() for k, v in u_dict.items()},
+            'affected_glycans_per_batch': {k: len(v) for k, v in u_dict.items()}
+        }
         
         metadata_path = f"{output_dir}/metadata_seed{seed}.json"
         with open(metadata_path, 'w') as f:

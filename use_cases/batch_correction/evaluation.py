@@ -13,139 +13,6 @@ from glycowork.motif.analysis import get_differential_expression
 from glycoforge.sim_bio_factor import create_bio_groups
 
 
-
-
-def check_batch_effect(data, 
-                       batch_labels, 
-                       bio_groups=None,
-                       verbose=True
-                       ):
-    
-    X = np.asarray(data).T
-    pca = PCA(n_components=min(5, X.shape[0]-1))
-    pc = pca.fit_transform(X)
-    var_explained = pca.explained_variance_ratio_[:2].sum()
-    
-    batch_cat = pd.Categorical(batch_labels)
-    pc1_by_batch = [pc[batch_cat==b, 0] for b in batch_cat.categories]
-    
-    total_samples = len(pc[:, 0])
-    if total_samples < 30:
-        f_stat, p_val = kruskal(*pc1_by_batch)
-        test_used = "Kruskal-Wallis"
-    else:
-        _, norm_p = shapiro(pc[:, 0])
-        if norm_p < 0.05:
-            f_stat, p_val = kruskal(*pc1_by_batch)
-            test_used = "Kruskal-Wallis"
-        else:
-            f_stat, p_val = f_oneway(*pc1_by_batch)
-            test_used = "ANOVA"
-    
-    if test_used == "ANOVA":
-        ss_total = np.var(pc[:, 0]) * (len(pc[:, 0]) - 1)
-        ss_between = sum([len(group) * (np.mean(group) - np.mean(pc[:, 0]))**2 
-                         for group in pc1_by_batch])
-        batch_eta = ss_between / ss_total if ss_total > 0 else 0
-    else:
-        batch_eta = (f_stat - len(batch_cat.categories) + 1) / (total_samples - len(batch_cat.categories) + 1)
-        batch_eta = max(0, min(1, batch_eta))
-    
-    if verbose:
-        print(f"PC1-2 explain {var_explained:.1%} variance")
-        print(f"Batch effect on PC1: F={f_stat:.2f}, p={p_val:.3e} ({test_used})")
-        print(f"Batch effect size (eta²): {batch_eta:.1%}")
-    
-    results = {
-        'pca_variance_explained': float(var_explained),
-        'batch_effect': {
-            'f_statistic': float(f_stat),
-            'p_value': float(p_val),
-            'test_used': test_used,
-            'effect_size_eta2': float(batch_eta)
-        }
-    }
-    
-    severity = None
-    severity_description = None
-    
-    if bio_groups is not None:
-        bio_cat = pd.Categorical(bio_groups)
-        pc1_by_bio = [pc[bio_cat==g, 0] for g in bio_cat.categories]
-        
-        if total_samples < 30 or (total_samples >= 30 and norm_p < 0.05):
-            f_bio, p_bio = kruskal(*pc1_by_bio)
-        else:
-            f_bio, p_bio = f_oneway(*pc1_by_bio)
-        
-        if test_used == "ANOVA":
-            ss_bio_between = sum([len(group) * (np.mean(group) - np.mean(pc[:, 0]))**2 
-                                 for group in pc1_by_bio])
-            bio_eta = ss_bio_between / ss_total if ss_total > 0 else 0
-        else:
-            bio_eta = (f_bio - len(bio_cat.categories) + 1) / (total_samples - len(bio_cat.categories) + 1)
-            bio_eta = max(0, min(1, bio_eta))
-        
-        if verbose:
-            print(f"Biological effect on PC1: F={f_bio:.2f}, p={p_bio:.3e}")
-            print(f"Biological effect size (eta²): {bio_eta:.1%}")
-        
-        results['biological_effect'] = {
-            'f_statistic': float(f_bio),
-            'p_value': float(p_bio),
-            'effect_size_eta2': float(bio_eta)
-        }
-        
-        if p_val < 0.05 and p_bio < 0.05:
-            if batch_eta > bio_eta + 0.1:
-                if batch_eta > 0.3:
-                    severity = "CRITICAL"
-                elif batch_eta > 0.2:
-                    severity = "MODERATE"
-                else:
-                    severity = "MILD"
-                severity_description = f"Batch effect ({batch_eta:.1%}) stronger than biological signal ({bio_eta:.1%})"
-                if verbose:
-                    print(f"Warning: {severity_description} - {severity}")
-            else:
-                severity = "GOOD"
-                severity_description = f"Biological signal ({bio_eta:.1%}) stronger than batch effect ({batch_eta:.1%})"
-                if verbose:
-                    print(f"Good: {severity_description}")
-        elif p_val < 0.05 and p_bio >= 0.05:
-            severity = "WARNING"
-            severity_description = "Significant batch effect detected, but no significant biological signal"
-            if verbose:
-                print(f"Warning: {severity_description}")
-        elif p_val >= 0.05 and p_bio < 0.05:
-            severity = "GOOD"
-            severity_description = "Biological signal detected without significant batch effect"
-            if verbose:
-                print(f"Good: {severity_description}")
-        else:
-            severity = "NONE"
-            severity_description = "Neither batch nor biological effects are statistically significant"
-            if verbose:
-                print(f"Note: {severity_description}")
-        
-        results['severity'] = severity
-        results['severity_description'] = severity_description
-    
-    batch_dummies = pd.get_dummies(batch_labels).values
-    var_batch = np.array([np.corrcoef(X[:, i], batch_dummies.T)[0, 1:].max()**2 
-                         for i in range(X.shape[1])])
-    median_var_batch = float(np.median(var_batch))
-    
-    if verbose:
-        print(f"Median variance explained by batch across features: {median_var_batch:.1%}")
-    
-    results['median_variance_explained_by_batch'] = median_var_batch
-    
-    return results, pc, var_batch
-
-
-
-
 def pca_batch_effect(data, batch):
     """
     Calculate batch effect strength using PCA.
@@ -513,12 +380,12 @@ def compare_differential_expression(dataset1=None, #simulated clean data
             },
             "compare_1v2": {
                 "batch_effect_errors": {
-                    "gained_counts": len(gained_signals_1v2),
-                    "gained_indices": gained_signals_1v2,
-                    "lost_counts": len(lost_signals_1v2),
-                    "lost_indices": lost_signals_1v2,
-                    "overlap_count": len(overlap_1v2),
-                    "overlap_rate": len(overlap_1v2) / max(len(sig1), 1) * 100
+                    "tp_count": len(overlap_1v2),
+                    "tp_indices": overlap_1v2,
+                    "fp_count": len(gained_signals_1v2),
+                    "fp_indices": gained_signals_1v2,
+                    "fn_count": len(lost_signals_1v2),
+                    "fn_indices": lost_signals_1v2
                 }
             }
         }
@@ -539,17 +406,13 @@ def compare_differential_expression(dataset1=None, #simulated clean data
         }
         results["results"]["compare_1v3"] = {
             "after_correction_errors": {
-                "gained_counts": len(gained_signals_1v3),
-                "gained_indices": gained_signals_1v3,
-                "lost_counts": len(lost_signals_1v3),
-                "lost_indices": lost_signals_1v3,
-                "overlap_count": len(overlap_1v3),
-                "overlap_rate": len(overlap_1v3) / max(len(sig1), 1) * 100
+                "tp_count": len(overlap_1v3),
+                "tp_indices": overlap_1v3,
+                "fp_count": len(gained_signals_1v3),
+                "fp_indices": gained_signals_1v3,
+                "fn_count": len(lost_signals_1v3),
+                "fn_indices": lost_signals_1v3
             }
-        }
-        results["results"]["overall"] = {
-            "recovery_overlap_change_rate": (len(overlap_1v3) - len(overlap_1v2)) / max(len(sig1), 1) * 100,
-            "recovery_false_positive_change_rate": (len(gained_signals_1v3) - len(gained_signals_1v2)) / max(len(sig1), 1) * 100
         }
     
     # Print summary
@@ -557,17 +420,12 @@ def compare_differential_expression(dataset1=None, #simulated clean data
         print(f"Dataset 1 ({dataset1_name}): {len(sig1)}/{len(res1)} significant glycans")
         print(f"Dataset 2 ({dataset2_name}): {len(sig2)}/{len(res2)} significant glycans")
         print(f"Compare 1vs2 - Batch Effect Errors:")
-        print(f"  Gained: {len(gained_signals_1v2)} glycans, Lost: {len(lost_signals_1v2)} glycans")
-        print(f"  Overlap count & rate: {len(overlap_1v2)} ({len(overlap_1v2)/max(len(sig1),1)*100:.1f}%)")
+        print(f"  TP: {len(overlap_1v2)} glycans, FP: {len(gained_signals_1v2)} glycans, FN: {len(lost_signals_1v2)} glycans")
         
         if df3 is not None:
             print(f"Dataset 3 ({dataset3_name}): {len(sig3)}/{len(res3)} significant glycans")
             print(f"Compare 1vs3 - After Correction Errors:")
-            print(f"  Gained: {len(gained_signals_1v3)} glycans, Lost: {len(lost_signals_1v3)} glycans")
-            print(f"  Overlap count & rate: {len(overlap_1v3)} ({len(overlap_1v3)/max(len(sig1),1)*100:.1f}%)")
-            print(f"Overall:")
-            print(f"  Recovery overlap change rate: {(len(overlap_1v3) - len(overlap_1v2))/max(len(sig1),1)*100:.1f}%")
-            print(f"  Recovery false positive change rate: {(len(gained_signals_1v3) - len(gained_signals_1v2))/max(len(sig1),1)*100:.1f}%")
+            print(f"  TP: {len(overlap_1v3)} glycans, FP: {len(gained_signals_1v3)} glycans, FN: {len(lost_signals_1v3)} glycans")
         print("=" * 60)
     
     return results
@@ -675,30 +533,250 @@ def generate_comprehensive_metrics(seed, output_dir,
                                  run_config,
                                  batch_check_results=None):
     
-    metadata = {
-        "run_config": run_config.copy(),
+    # Extract parameters from run_config
+    params = run_config.get('key_parameters', {})
+    
+    # Build run_info
+    run_info = {
         "seed": seed,
         "analysis_timestamp": datetime.now().isoformat(),
-        "pipeline_version": "1.0",
         "output_dir": output_dir
     }
     
-    if batch_check_results is not None:
-        metadata["quick_batch_check"] = batch_check_results
-    
-    comprehensive_data = {
-        "metadata": metadata,
-        "batch_effect_metrics": {
-            "before_correction": batch_metrics_before.copy(),
-            "after_correction": batch_metrics_after.copy()
+    # Build simulation_config
+    simulation_config = {
+        "data_source": params.get('data_source', 'simulated'),
+        "bio_parameters": {
+            "n_H": params.get('n_H', 15),
+            "n_U": params.get('n_U', 15),
+            "bio_strength": params.get('bio_strength', 1.5),
+            "k_dir": params.get('k_dir', 100),
+            "k_dir_H": params.get('k_dir_H', params.get('k_dir', 100)),
+            "k_dir_U": params.get('k_dir_U', params.get('k_dir', 100) / params.get('variance_ratio', 1.5)),
+            "variance_ratio": params.get('variance_ratio', 1.5),
+            "differential_mask_config": params.get('differential_mask_config', 'All')
         },
-        "differential_expression": diff_expr_results.copy()
+        "batch_parameters": {
+            "n_batches": params.get('n_batches', 3),
+            "kappa_mu": params.get('kappa_mu', 1.0),
+            "var_b": params.get('var_b', 0.5),
+            "affected_fraction": params.get('affected_fraction', [0.05, 0.30]),
+            "positive_prob": params.get('positive_prob', 0.6),
+            "overlap_prob": params.get('overlap_prob', 0.5)
+        }
     }
     
-    output_file = f"{output_dir}/comprehensive_metrics_seed{seed}.json"
+    # Add hybrid mode specific parameters
+    if params.get('data_source') == 'real':
+        simulation_config['data_file'] = params.get('data_file')
+        simulation_config['use_real_effect_sizes'] = params.get('use_real_effect_sizes', False)
+        if params.get('column_prefix'):
+            simulation_config['column_prefix'] = params.get('column_prefix')
+        if params.get('winsorize_percentile'):
+            simulation_config['bio_parameters']['winsorize_percentile'] = params.get('winsorize_percentile')
+        if params.get('baseline_method'):
+            simulation_config['bio_parameters']['baseline_method'] = params.get('baseline_method')
+    
+    # Extract bio preservation metrics from batch_metrics_after
+    bio_preservation = {
+        "biological_variability_preservation": batch_metrics_after.pop('biological_variability_preservation', None),
+        "conserved_differential_proportion": batch_metrics_after.pop('conserved_differential_proportion', None)
+    }
+    # Remove None values
+    bio_preservation = {k: v for k, v in bio_preservation.items() if v is not None}
+    
+    # Calculate improvement metrics for all 6 batch correction metrics
+    improvement = {}
+    
+    # Metrics where lower is better (reduction is improvement)
+    lower_better_metrics = ['silhouette', 'kBET', 'ARI', 'compositional_effect_size', 'pca_batch_effect']
+    for metric in lower_better_metrics:
+        if metric in batch_metrics_before and metric in batch_metrics_after:
+            before_val = batch_metrics_before[metric]
+            after_val = batch_metrics_after[metric]
+            if before_val != 0:
+                reduction = ((before_val - after_val) / before_val) * 100
+                improvement[f'{metric}_reduction_pct'] = round(reduction, 2)
+    
+    # Metrics where higher is better (increase is improvement)
+    if 'LISI' in batch_metrics_before and 'LISI' in batch_metrics_after:
+        before_val = batch_metrics_before['LISI']
+        after_val = batch_metrics_after['LISI']
+        if before_val != 0:
+            increase = ((after_val - before_val) / before_val) * 100
+            improvement['LISI_increase_pct'] = round(increase, 2)
+    
+    # Build correction_results
+    correction_results = {
+        "batch_correction": {
+            "before": batch_metrics_before.copy(),
+            "after": batch_metrics_after.copy(),
+            "improvement": improvement
+        }
+    }
+    
+    if bio_preservation:
+        correction_results['bio_preservation'] = bio_preservation
+    
+    # Process differential expression results
+    if diff_expr_results:
+        de_results = diff_expr_results.get('results', {})
+        de_processed = {
+            "Y_clean": {
+                "significant_count": de_results.get('dataset1', {}).get('significant_count', 0),
+                "significant_glycans": de_results.get('dataset1', {}).get('significant_indices', [])
+            },
+            "Y_with_batch": {
+                "significant_count": de_results.get('dataset2', {}).get('significant_count', 0),
+                "significant_glycans": de_results.get('dataset2', {}).get('significant_indices', [])
+            },
+            "Y_corrected": {
+                "significant_count": de_results.get('dataset3', {}).get('significant_count', 0),
+                "significant_glycans": de_results.get('dataset3', {}).get('significant_indices', [])
+            }
+        }
+        
+        # Process batch impact
+        batch_errors = de_results.get('compare_1v2', {}).get('batch_effect_errors', {})
+        y_clean_count = de_results.get('dataset1', {}).get('significant_count', 0)
+        y_batch_count = de_results.get('dataset2', {}).get('significant_count', 0)
+        total_glycans = diff_expr_results.get('metadata', {}).get('total_glycans', 98)
+        
+        # Calculate confusion matrix for batch impact
+        # TP = overlap (Y_clean ∩ Y_batch), FP = gained (Y_batch - Y_clean)
+        # FN = lost (Y_clean - Y_batch), TN = total - TP - FP - FN
+        batch_tp_count = batch_errors.get('tp_count', 0)
+        batch_tp_indices = batch_errors.get('tp_indices', [])
+        batch_fp_count = batch_errors.get('fp_count', 0)
+        batch_fp_indices = batch_errors.get('fp_indices', [])
+        batch_fn_count = batch_errors.get('fn_count', 0)
+        batch_fn_indices = batch_errors.get('fn_indices', [])
+        batch_tn_count = total_glycans - batch_tp_count - batch_fp_count - batch_fn_count
+        
+        # Calculate TN indices: all glycans except TP, FP, FN
+        all_glycans = set(range(1, total_glycans + 1))
+        batch_tn_indices = sorted(list(all_glycans - set(batch_tp_indices) - set(batch_fp_indices) - set(batch_fn_indices)))
+        
+        # Calculate performance metrics for Y_with_batch
+        batch_precision = batch_tp_count / max(batch_tp_count + batch_fp_count, 1)
+        batch_recall = batch_tp_count / max(batch_tp_count + batch_fn_count, 1)
+        batch_f1 = 2 * batch_precision * batch_recall / max(batch_precision + batch_recall, 1e-10)
+        
+        # Add confusion matrix to Y_with_batch (preserve significant_count and significant_glycans)
+        de_processed['Y_with_batch'].update({
+            "true_positive": {
+                "count": batch_tp_count,
+                "rate_pct": round(batch_tp_count / max(y_clean_count, 1) * 100, 2),
+                "indices": batch_tp_indices
+            },
+            "false_positive": {
+                "count": batch_fp_count,
+                "rate_pct": round(batch_fp_count / max(total_glycans, 1) * 100, 2),
+                "indices": batch_fp_indices
+            },
+            "true_negative": {
+                "count": batch_tn_count,
+                "rate_pct": round(batch_tn_count / max(total_glycans, 1) * 100, 2),
+                "indices": batch_tn_indices
+            },
+            "false_negative": {
+                "count": batch_fn_count,
+                "rate_pct": round(batch_fn_count / max(y_clean_count, 1) * 100, 2),
+                "indices": batch_fn_indices
+            },
+            "f1_score": round(batch_f1, 4),
+            "precision": round(batch_precision, 4),
+            "recall": round(batch_recall, 4)
+        })
+        
+        # Process correction recovery
+        correction_errors = de_results.get('compare_1v3', {}).get('after_correction_errors', {})
+        y_corrected_count = de_results.get('dataset3', {}).get('significant_count', 0)
+        
+        # Calculate confusion matrix for correction recovery
+        # TP = overlap (Y_clean ∩ Y_corrected), FP = gained (Y_corrected - Y_clean)
+        # FN = lost (Y_clean - Y_corrected), TN = total - TP - FP - FN
+        corrected_tp_count = correction_errors.get('tp_count', 0)
+        corrected_tp_indices = correction_errors.get('tp_indices', [])
+        corrected_fp_count = correction_errors.get('fp_count', 0)
+        corrected_fp_indices = correction_errors.get('fp_indices', [])
+        corrected_fn_count = correction_errors.get('fn_count', 0)
+        corrected_fn_indices = correction_errors.get('fn_indices', [])
+        corrected_tn_count = total_glycans - corrected_tp_count - corrected_fp_count - corrected_fn_count
+        
+        # Calculate TN indices: all glycans except TP, FP, FN
+        corrected_tn_indices = sorted(list(all_glycans - set(corrected_tp_indices) - set(corrected_fp_indices) - set(corrected_fn_indices)))
+        
+        # Calculate performance metrics for Y_after_correction
+        corrected_precision = corrected_tp_count / max(corrected_tp_count + corrected_fp_count, 1)
+        corrected_recall = corrected_tp_count / max(corrected_tp_count + corrected_fn_count, 1)
+        corrected_f1 = 2 * corrected_precision * corrected_recall / max(corrected_precision + corrected_recall, 1e-10)
+        
+        # Add confusion matrix to Y_after_correction (preserve significant_count and significant_glycans)
+        de_processed['Y_after_correction'] = de_processed.get('Y_corrected', {}).copy()
+        de_processed['Y_after_correction'].update({
+            "true_positive": {
+                "count": corrected_tp_count,
+                "rate_pct": round(corrected_tp_count / max(y_clean_count, 1) * 100, 2),
+                "indices": corrected_tp_indices
+            },
+            "false_positive": {
+                "count": corrected_fp_count,
+                "rate_pct": round(corrected_fp_count / max(total_glycans, 1) * 100, 2),
+                "indices": corrected_fp_indices
+            },
+            "true_negative": {
+                "count": corrected_tn_count,
+                "rate_pct": round(corrected_tn_count / max(total_glycans, 1) * 100, 2),
+                "indices": corrected_tn_indices
+            },
+            "false_negative": {
+                "count": corrected_fn_count,
+                "rate_pct": round(corrected_fn_count / max(y_clean_count, 1) * 100, 2),
+                "indices": corrected_fn_indices
+            },
+            "f1_score": round(corrected_f1, 4),
+            "precision": round(corrected_precision, 4),
+            "recall": round(corrected_recall, 4)
+        })
+        
+        # Process summary with all change rates
+        overall = de_results.get('overall', {})
+        
+        # Calculate change rates for all confusion matrix elements
+        tp_change = (corrected_tp_count - batch_tp_count) / max(batch_tp_count, 1) * 100
+        fp_change = (corrected_fp_count - batch_fp_count) / max(batch_fp_count, 1) * 100
+        tn_change = (corrected_tn_count - batch_tn_count) / max(batch_tn_count, 1) * 100
+        fn_change = (corrected_fn_count - batch_fn_count) / max(batch_fn_count, 1) * 100
+        
+        # Calculate change rates for derived metrics
+        f1_change = (corrected_f1 - batch_f1) / max(batch_f1, 1e-10) * 100
+        precision_change = (corrected_precision - batch_precision) / max(batch_precision, 1e-10) * 100
+        recall_change = (corrected_recall - batch_recall) / max(batch_recall, 1e-10) * 100
+        
+        de_processed['summary'] = {
+            "true_positive_change_pct": round(tp_change, 2),
+            "false_positive_change_pct": round(fp_change, 2),
+            "true_negative_change_pct": round(tn_change, 2),
+            "false_negative_change_pct": round(fn_change, 2),
+            "f1_score_change_pct": round(f1_change, 2),
+            "precision_change_pct": round(precision_change, 2),
+            "recall_change_pct": round(recall_change, 2)
+        }
+        
+        correction_results['differential_expression'] = de_processed
+    
+    # Assemble final structure
+    correction_data = {
+        "run_info": run_info,
+        "simulation_config": simulation_config,
+        "correction_results": correction_results
+    }
+    
+    output_file = f"{output_dir}/correction_metrics_seed{seed}.json"
     with open(output_file, 'w') as f:
-        json.dump(comprehensive_data, f, indent=2)
+        json.dump(correction_data, f, indent=2)
     
-    print(f"Comprehensive metrics saved to: {output_file}")
+    print(f"Correction metrics saved to: {output_file}")
     
-    return comprehensive_data
+    return correction_data

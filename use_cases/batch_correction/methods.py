@@ -53,3 +53,34 @@ def combat(data, batch, mod=None, parametric=True):
 
     return X_adj.T  # glycans x samples
 
+
+#  handle NaN in CLR data
+def add_noise_to_zero_variance_features(data, #glycans x samples
+                                        noise_level=1e-6,  #Relative noise magnitude based on the row mean.
+                                        random_seed=42):
+    rng = np.random.default_rng(random_seed)
+    data_with_noise = data.copy()
+    
+    for glycan_idx in range(data.shape[0]):
+        row_values = data.iloc[glycan_idx, :].values
+        
+        # Detect zero-variance features (within floating-point precision)
+        if np.std(row_values) < 1e-12:
+            # Determine noise amplitude relative to the row mean
+            row_mean = np.mean(row_values)
+            if row_mean > 0:
+                noise_amplitude = row_mean * noise_level
+            else:
+                noise_amplitude = noise_level  # Absolute noise if mean is zero
+            
+            # Add independent random noise to each sample
+            noise = rng.normal(0, noise_amplitude, len(row_values))
+            data_with_noise.iloc[glycan_idx, :] += noise
+            
+            # Ensure all values remain positive
+            data_with_noise.iloc[glycan_idx, :] = np.maximum(
+                data_with_noise.iloc[glycan_idx, :], 
+                noise_level  # Minimum safeguard value
+            )
+    
+    return data_with_noise

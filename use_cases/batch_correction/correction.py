@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import tempfile
 import shutil
@@ -6,18 +7,17 @@ import pandas as pd
 import numpy as np
 import itertools
 from copy import deepcopy
-from glycoforge.pipeline import simulate
-from glycoforge.utils import invclr
-from glycoforge.sim_bio_factor import add_noise_to_zero_variance_features
+from glycoforge import simulate
+from glycoforge import invclr
 from glycoforge.sim_batch_factor import define_batch_direction
-from .methods import combat
+from .methods import combat, add_noise_to_zero_variance_features
 from .evaluation import (
     quantify_batch_effect_impact,
     evaluate_biological_preservation,
     compare_differential_expression,
     generate_comprehensive_metrics
 )
-from .visualization import plot_pca
+from glycoforge.utils import plot_pca, load_data_from_glycowork
 
 
 def get_param(config, key, default=None):
@@ -49,14 +49,25 @@ def generate_all_data(config, cache_dir):
         data_file = get_param(config, 'data_file')
         if data_file is None:
             raise ValueError("data_file is required when data_source='real'")
-        df = pd.read_csv(data_file)
+        
+
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        
+        
+        df = load_data_from_glycowork(data_file)
         n_glycans = len(df)  # Number of glycans (rows in CSV)
         if verbose:
             print(f"[Hybrid Mode] Detected {n_glycans} glycans from real data: {data_file}")
     else:
         n_glycans = get_param(config, 'n_glycans', 50)
     
-    # Generate global u_dict once for all seeds ensuring consistent batch structure)
+    # Generate global u_dict once for all seeds to ensure consistent batch structure
+    # Note: This logic is kept for future extensibility (e.g., if affected_fraction becomes 
+    # part of the parameter grid). Currently, simulate() uses a fixed u_dict_seed=42 by default,
+    # but generating u_dict here avoids redundant computation across multiple runs and provides
+    # explicit control over batch effect structure consistency.
     u_dict_global = define_batch_direction(
         n_glycans=n_glycans,
         n_batches=get_param(config, 'n_batches', 3),
@@ -113,8 +124,8 @@ def generate_all_data(config, cache_dir):
                 'use_real_effect_sizes': get_param(config, 'use_real_effect_sizes', False),
                 'differential_mask': get_param(config, 'differential_mask', 'All'),
                 'column_prefix': get_param(config, 'column_prefix'),
-                'max_fold_change': get_param(config, 'max_fold_change', 3.0),
-                'scaling_strategy': get_param(config, 'scaling_strategy', 'clip'),
+                'winsorize_percentile': get_param(config, 'winsorize_percentile', None),
+                'baseline_method': get_param(config, 'baseline_method', 'median'),
                 'n_batches': get_param(config, 'n_batches', 3),
                 'affected_fraction': get_param(config, 'affected_fraction', (0.05, 0.30)),
                 'positive_prob': get_param(config, 'positive_prob', 0.6),
@@ -184,11 +195,11 @@ def process_corrections(config, cache_dir):
             with open(f"{seed_cache_path}/metadata_seed{seed}.json", 'r') as f:
                 metadata = json.load(f)
             
-            batch_labels = np.array(metadata['data_info']['batch_labels'])
-            bio_labels = np.array(metadata['data_info']['bio_labels'])
-            bio_groups = metadata['data_info']['bio_groups']
-            batch_groups = metadata['detailed_batch_info']['batch_groups']
-            batch_check_results = metadata.get('quickly_check_batch_effect', {})
+            batch_labels = np.array(metadata['sample_info']['batch_labels'])
+            bio_labels = np.array(metadata['sample_info']['bio_labels'])
+            bio_groups = metadata['sample_info']['bio_groups']
+            batch_groups = metadata['sample_info']['batch_groups']
+            batch_check_results = metadata.get('quality_checks', {}).get('Y_with_batch', {})
             
             batch_metrics_before = quantify_batch_effect_impact(
                 Y_with_batch_clr, 
@@ -248,8 +259,23 @@ def process_corrections(config, cache_dir):
             with open(metadata_output_path, 'w') as f:
                 json.dump(metadata, f, indent=2)
             
-            run_config = deepcopy(metadata.get('key_parameters', {}))
-            run_config['seed'] = seed
+            # Build run_config from new metadata structure
+            run_config = {
+                'seed': seed,
+                'data_source': metadata.get('data_source', 'simulated')
+            }
+            
+            # Add data_file for hybrid mode
+            if 'data_file' in metadata:
+                run_config['data_file'] = metadata['data_file']
+            if 'use_real_effect_sizes' in metadata:
+                run_config['use_real_effect_sizes'] = metadata['use_real_effect_sizes']
+            
+            # Merge bio_parameters and batch_parameters
+            if 'bio_parameters' in metadata:
+                run_config.update(metadata['bio_parameters'])
+            if 'batch_parameters' in metadata:
+                run_config.update(metadata['batch_parameters'])
             
             generate_comprehensive_metrics(
                 seed=seed,

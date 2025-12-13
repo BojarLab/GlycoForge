@@ -41,7 +41,7 @@ def test_define_dirichlet_params_from_real_data():
     effect_sizes = np.array([1.2, -0.8, 0.1])
     differential_mask = np.array([1, 1, 0])
     
-    alpha_H, alpha_U = define_dirichlet_params_from_real_data(
+    alpha_H, alpha_U, debug_info = define_dirichlet_params_from_real_data(
         p_h, effect_sizes, differential_mask,
         bio_strength=1.0,
         k_dir=10,
@@ -52,6 +52,13 @@ def test_define_dirichlet_params_from_real_data():
     assert alpha_U.shape == (3,)
     assert np.all(alpha_H > 0)
     assert np.all(alpha_U > 0)
+    
+    # Check debug_info structure
+    assert 'raw_effect_sizes' in debug_info
+    assert 'd_robust' in debug_info
+    assert 'injection' in debug_info
+    assert 'p_h' in debug_info
+    assert 'p_u' in debug_info
 
 def test_apply_batch_effect():
     """Test batch effect application"""
@@ -62,7 +69,7 @@ def test_apply_batch_effect():
     u_dict = define_batch_direction(
         n_glycans=n_glycans, 
         n_batches=3, 
-        seed=42, 
+        u_dict_seed=42, 
         verbose=False
     )
     
@@ -77,71 +84,149 @@ def test_apply_batch_effect():
     assert Y_batch.shape == (n_samples, n_glycans)
     assert np.allclose(Y_batch.sum(axis=1), 100.0)  # Returns percentage
 
-# def test_quantify_batch_effect_impact():
-#     """Test batch effect quantification metrics"""
-#     n_glycans, n_samples = 10, 30
-#     np.random.seed(42)
-    
-#     # Create data with batch effects
-#     data = np.random.randn(n_glycans, n_samples)
-#     batch_labels = np.array([0]*10 + [1]*10 + [2]*10)
-    
-#     # Add batch effect
-#     data[:5, :10] += 2  # Batch 0
-#     data[:5, 20:30] -= 2  # Batch 2
-    
-#     df = pd.DataFrame(data)
-#     bio_groups = {
-#         'Healthy': list(range(15)),
-#         'Unhealthy': list(range(15, 30))
-#     }
-    
-#     metrics = quantify_batch_effect_impact(
-#         df, batch_labels, bio_groups, verbose=False
-#     )
-    
-#     assert 'silhouette' in metrics
-#     assert 'kBET' in metrics
-#     assert 'LISI' in metrics
-#     assert 'ARI' in metrics
-#     assert 'compositional_effect_size' in metrics
-#     assert 'pca_batch_effect' in metrics
-#     assert -1 <= metrics['silhouette'] <= 1
 
-# def test_evaluate_biological_preservation():
-#     """Test biological preservation metrics"""
-#     n_glycans, n_samples = 10, 20
-#     np.random.seed(42)
+def test_check_batch_effect():
+    """Test batch effect checking with bio_groups"""
+    from glycoforge.utils import check_batch_effect
     
-#     clean_data = pd.DataFrame(np.random.randn(n_glycans, n_samples))
-#     corrected_data = clean_data + np.random.randn(n_glycans, n_samples) * 0.1
-#     bio_labels = np.array([0]*10 + [1]*10)
+    n_samples, n_features = 30, 10
+    np.random.seed(42)
     
-#     preservation = evaluate_biological_preservation(
-#         clean_data, corrected_data, bio_labels
-#     )
+    data = pd.DataFrame(np.random.randn(n_features, n_samples))
+    batch_labels = np.array([0]*10 + [1]*10 + [2]*10)
+    bio_groups = np.array([0]*15 + [1]*15)
     
-#     assert 'biological_variability_preservation' in preservation
-#     assert 'conserved_differential_proportion' in preservation
-#     assert 0 <= preservation['biological_variability_preservation'] <= 1
-#     assert 0 <= preservation['conserved_differential_proportion'] <= 1
+    results, pc, var_batch = check_batch_effect(
+        data, batch_labels, bio_groups, verbose=False
+    )
+    
+    # Check main structure
+    assert 'pca_variance_explained' in results
+    assert 'batch_effect' in results
+    assert 'bio_effect' in results
+    assert 'overall_quality' in results
+    
+    # Check nested batch_effect structure
+    assert 'f_statistic' in results['batch_effect']
+    assert 'p_value' in results['batch_effect']
+    assert 'test_used' in results['batch_effect']
+    assert 'effect_size_eta2' in results['batch_effect']
+    
+    # Check nested bio_effect structure
+    assert 'f_statistic' in results['bio_effect']
+    assert 'p_value' in results['bio_effect']
+    assert 'effect_size_eta2' in results['bio_effect']
+    
+    # Check overall_quality structure
+    assert 'severity' in results['overall_quality']
+    assert 'severity_description' in results['overall_quality']
+    assert 'median_variance_explained_by_batch' in results['overall_quality']
+    
+    # Check output arrays
+    assert pc.shape[0] == n_samples
+    assert len(var_batch) == n_features
 
-# def test_check_batch_effect():
-#     """Test batch effect checking"""
-#     n_samples, n_features = 30, 10
-#     np.random.seed(42)
+
+def test_check_bio_effect():
+    """Test biological effect checking"""
+    from glycoforge.utils import check_bio_effect
     
-#     data = pd.DataFrame(np.random.randn(n_features, n_samples))
-#     batch_labels = np.array([0]*10 + [1]*10 + [2]*10)
-#     bio_labels = np.array([0]*15 + [1]*15)
+    n_samples, n_glycans = 30, 10
+    np.random.seed(42)
     
-#     results, pc, var_batch = check_batch_effect(
-#         data, batch_labels, bio_labels, verbose=False
-#     )
+    # Create CLR-transformed data with biological differences
+    data_clr = pd.DataFrame(
+        np.random.randn(n_glycans, n_samples),
+        columns=[f'sample_{i}' for i in range(n_samples)]
+    )
+    # Add biological signal
+    data_clr.iloc[:5, 15:] += 1.0  # First 5 glycans differ between groups
     
-#     assert 'pca_variance_explained' in results
-#     assert 'batch_effect' in results
-#     assert 'biological_effect' in results
-#     assert 'severity' in results
-#     assert pc.shape[0] == n_samples
-#     assert len(var_batch) == n_features
+    bio_labels = np.array([0]*15 + [1]*15)
+    
+    results, pc = check_bio_effect(
+        data_clr, bio_labels, stage_name="test", verbose=False
+    )
+    
+    # Check structure
+    assert 'pca_variance_explained' in results
+    assert 'bio_effect' in results
+    
+    # Check bio_effect nested structure
+    assert 'f_statistic' in results['bio_effect']
+    assert 'p_value' in results['bio_effect']
+    assert 'effect_size_eta2' in results['bio_effect']
+    
+    # Check PC output
+    assert pc.shape[0] == n_samples
+    assert pc.shape[1] >= 2  # At least 2 principal components
+
+
+def test_robust_effect_size_processing():
+    """Test Winsorization of effect sizes"""
+    from glycoforge.sim_bio_factor import robust_effect_size_processing
+    
+    np.random.seed(42)
+    effect_sizes = np.array([0.1, 0.5, 1.2, 3.5, 10.0, -0.3, -1.5, -8.0])
+    
+    # Test with automatic winsorization
+    d_normalized = robust_effect_size_processing(
+        effect_sizes, 
+        winsorize_percentile=95,
+        baseline_method="median",
+        verbose=False
+    )
+    
+    # Check that extreme values are clipped (normalized values should be smaller)
+    # The function returns normalized effect sizes (centered, winsorized, and baseline-scaled)
+    assert isinstance(d_normalized, np.ndarray)
+    assert len(d_normalized) == len(effect_sizes)
+    
+    # After winsorization and normalization, max absolute value should be reasonable
+    assert np.max(np.abs(d_normalized)) < 10  # Should be more moderate after processing
+
+
+def test_define_differential_mask():
+    """Test differential mask generation"""
+    from glycoforge.sim_bio_factor import define_differential_mask
+    
+    n_glycans = 20
+    effect_sizes = np.random.randn(n_glycans)
+    significant_mask = np.zeros(n_glycans)
+    significant_mask[:5] = 1  # First 5 are significant
+    
+    # Test "All" mode
+    mask_all = define_differential_mask("All", n_glycans, verbose=False)
+    assert np.all(mask_all == 1.0)
+    assert len(mask_all) == n_glycans
+    
+    # Test "Null" mode
+    mask_null = define_differential_mask("Null", n_glycans, verbose=False)
+    assert np.all(mask_null == 0.0)
+    assert len(mask_null) == n_glycans
+    
+    # Test "significant" mode
+    mask_sig = define_differential_mask(
+        "significant", n_glycans, 
+        significant_mask=significant_mask, 
+        verbose=False
+    )
+    assert np.sum(mask_sig) == 5
+    assert np.array_equal(mask_sig, significant_mask)
+    
+    # Test "Top-N" mode
+    mask_top5 = define_differential_mask(
+        "Top-5", n_glycans, 
+        effect_sizes=effect_sizes, 
+        verbose=False
+    )
+    assert np.sum(mask_top5) == 5
+    # Check that it selected the 5 with largest absolute effect sizes
+    top5_idx = np.argsort(np.abs(effect_sizes))[-5:]
+    assert np.sum(mask_top5[top5_idx]) == 5
+    
+    # Test array input
+    custom_mask = np.array([1, 0, 1, 0] * 5)
+    mask_custom = define_differential_mask(custom_mask, n_glycans, verbose=False)
+    assert np.array_equal(mask_custom, custom_mask)
+

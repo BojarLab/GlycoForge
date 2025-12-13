@@ -42,12 +42,13 @@ There are 2 mode in simulation pipeline `glycoforge/pipeline.py::simulate` entry
      - `down_frac` (default 30%) are downregulated with scale factors from `down_scale_range=(0.3, 0.9)`
      - Remaining glycans (~40%) stay unchanged
   3. Samples clean cohorts from `Dirichlet(alpha_H)` and `Dirichlet(alpha_U)` with `n_H` healthy and `n_U` unhealthy samples
-  4. Applies batch effects controlled by `kappa_mu` (shift strength) and `var_b` (variance scaling)
-  5. Grid search over `kappa_mu` and `var_b` produces multiple simulated datasets for batch correction evaluation
+  4. Defines batch effect direction vectors `u_dict` once per simulation run (fixed seed ensures reproducible batch geometry across parameter sweep)
+  5. Applies batch effects controlled by `kappa_mu` (shift strength) and `var_b` (variance scaling)
+  6. Grid search over `kappa_mu` and `var_b` produces multiple simulated datasets under the same batch effect structure, enabling fair comparison of batch correction effectiveness
   
   This mode is ideal for controlled experiments where you want to test batch correction methods under known ground truth with varying batch effect strengths.
 
-- **Hybrid mode (`data_source="real"`)** – starts from real glycomics data to preserve biological signal structure. You provide a CSV file (e.g., patient data in `data/`), and the pipeline:
+- **Hybrid mode (`data_source="real"`)** – starts from real glycomics data to preserve biological signal structure. You provide a CSV file or import CSV file from `glycowork.glycan_data`, and the pipeline:
   1. Loads the CSV and extracts healthy/unhealthy sample columns by prefix (configurable via `column_prefix`)
   2. Runs CLR-based differential expression analysis via `glycowork.get_differential_expression` to compute Cohen's *d* effect sizes for each glycan
   3. Reindexes effect sizes to match input glycan order (fills missing glycans with 0.0 if glycowork filters some out)
@@ -55,18 +56,23 @@ There are 2 mode in simulation pipeline `glycoforge/pipeline.py::simulate` entry
      - `"All"`: inject into all glycans
      - `"significant"`: only glycans marked as significant by `glycowork` (using sample-size-adjusted alpha and corrected p-values)
      - `"Top-N"`: top N glycans by absolute effect size (e.g., `"Top-10"`)
-  5. Processes effect sizes through `robust_effect_size_processing` (centers, clips extreme fold changes based on `max_fold_change` and `scaling_strategy`)
+  5. Processes effect sizes through `robust_effect_size_processing`:
+     - Centers effect sizes to remove global shift
+     - Applies Winsorization to clip extreme outliers (auto-selects percentile 85-99 based on outlier severity, or uses `winsorize_percentile` if specified)
+     - Normalizes by baseline (median, MAD, or 75th percentile via `baseline_method`)
+     - Returns normalized effect sizes `d_robust` that caller scales by `bio_strength`
   6. Injects effects in CLR space: `z_U = z_H + m * bio_strength * d_robust`, where `z_H` is the healthy baseline CLR, `m` is the differential mask
   7. Converts back to proportions: `p_U = invclr(z_U)`
   8. Scales by Dirichlet concentration: `alpha_H = k_dir * p_H` and `alpha_U = (k_dir / variance_ratio) * p_U`
   9. Samples clean cohorts from `Dirichlet(alpha_H)` and `Dirichlet(alpha_U)` with `n_H` healthy and `n_U` unhealthy samples
-  10. Applies batch effects controlled by `kappa_mu` and `var_b`
-  11. Grid search over `bio_strength`, `k_dir`, `kappa_mu`, `var_b` to test how biological signal strength and batch effects interact
+  10. Defines batch effect direction vectors `u_dict` once per simulation run (**important**: `u_dict` is fixed across all parameter combinations in grid search using a reproducible seed, ensuring fair comparison between different `kappa_mu`/`var_b` settings)
+  11. Applies batch effects controlled by `kappa_mu` (shift strength) and `var_b` (variance scaling): `y_batch = y_clean + kappa_mu * sigma * u_b + epsilon`, where `epsilon ~ N(0, sqrt(var_b) * sigma)`
+  12. Grid search over `bio_strength`, `k_dir`, `variance_ratio`, `kappa_mu`, `var_b` to systematically test how biological signal strength and batch effects interact under controlled batch effect geometry
   
   This mode keeps the virtual cohort faithful to real biological signal geometry while letting you systematically vary signal strength (`bio_strength`), concentration (`k_dir`), variance (`variance_ratio`), and batch effects for realistic batch correction benchmarking.
 
 
-## Use-case
+## Use Cases
 
 - [use_cases/batch_correction/](use_cases/batch_correction) currently walks through the two-phase simulation + ComBat correction flow, plots, and metrics. The notebook `run_correction.ipynb` walks through both simulation mode step-by-step.
 

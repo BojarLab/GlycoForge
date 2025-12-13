@@ -1,55 +1,8 @@
 # Config for Hybrid Mode 
-output_dir: "results/hybrid_mode_batch_test"
+output_dir: "results/hybrid_mode_batch_N"
 verbose: false
 save_csv: true
 show_pca_plots: false
-
-
-# Data Source Configuration
-data_source: "real"
-data_file: "data/glycomics_human_leukemia_N_PMID34646384.csv"  
-use_real_effect_sizes: true
-
-# Column prefix mapping for real data (optional, defaults: healthy="R7", unhealthy="BM")
-column_prefix:
-  healthy: "R7"       # Columns starting with this prefix are treated as healthy/control group
-  unhealthy: "BM"     # Columns starting with this prefix are treated as unhealthy/disease group
-
-# Biological Signal Configuration
-n_H: 30
-n_U: 30
-
-# Differential Mask Options:
-# - "Null": No biological signal injected (all zeros). Useful for negative control.
-# - "All": Inject signal into all glycans (all ones).
-# - "significant": Use significant glycans marked by glycowork.motif.analysis.get_differential_expression 
-#   (using sample-size-adjusted alpha and FDR-corrected p-values via Benjamini-Hochberg or adaptive grouped methods).
-# - "Top-N": Use the top N glycans with the largest Cohen's d effect sizes (e.g., "Top-10") from glycowork.motif.analysis.get_differential_expression analysis.
-differential_mask: "Top-5" 
-
-# Bio Factor Parameters (Support Grid Search: list or single value)
-# Note: In hybrid mode, these control how the real bio effect sizes are injected
-bio_strength: 1.5   # Scaling factor for effect sizes in CLR space
-k_dir: 120            # Dirichlet concentration (inverse of biological noise)
-variance_ratio: 1.5    # k_dir_Unhealthy variance / k_dir_Healthy variance , suggestion value >= 1.0
-
-# Robust Bio Factor Processing Parameters.
-# scaling_strategy:
-#   - "clip" (Default, Strong Recommendation): Caps features exceeding the limit. Best for data with outliers.
-#   - "scale": Shrinks ALL features proportionally. Preserves relative ratios but may kill signal if outliers are huge.
-scaling_strategy: "clip"  
-max_fold_change: 2.5 # Maximum allowed fold change (e.g., 3.0 = 300% change), revents single features from dominating the composition 
-
-# Batch Effect Strength (Support Grid Search: list or single value)
-kappa_mu: [0.5,1.0, 1.2, 1.5, 2.0]    # Mean shift strength, Can be single values or lists for grid search
-var_b:  [ 0.5, 1.0, 1.2, 1.5, 2.0]      # Variance inflation factor
-
-# Batch Factor Parameters
-n_batches: 3
-affected_fraction: [0.1, 0.5]  # Fraction range of affected glycans per batch
-positive_prob: 0.6             # Probability of positive effects
-overlap_prob: 0.5              # Probability of overlap between batches
-
 
 # Random seed list for multiple runs with different random initializations
 # Each seed controls:
@@ -59,5 +12,55 @@ overlap_prob: 0.5              # Probability of overlap between batches
 # 4. Add noise to zero-variance glycans in simulate_clean_data()
 # Note: Batch direction vectors (u_dict) are generated ONCE using ALL seeds together,
 #       ensuring consistent batch structure across all runs for fair comparison.
-#random_seeds: [42, 123, 2024, 7, 99, 56, 88, 314, 271, 1618] 
-random_seeds: [42, 123 , 2024] 
+random_seeds: [42, 123, 2024, 7, 99, 56, 88, 314, 271, 1618] 
+#random_seeds: [271, 1618] 
+
+
+# Data Source Configuration
+data_source: "real"
+# data_file can be either:
+#   - Local file path: "path/to/file_name.csv"
+#   - Glycowork built-in dataset: "glycomics_human_leukemia_O_PMID34646384" (with or without .csv)
+data_file: "glycomics_human_leukemia_N_PMID34646384.csv"  #glycomics_human_liver_O_PMC5383776.csv
+use_real_effect_sizes: true # false = use uniform effect sizes for all bio-significant glycans
+# Column prefix mapping for real data (optional, defaults: healthy="R7", unhealthy="BM")
+column_prefix:
+  healthy: "R7"       # Columns starting with this prefix are treated as healthy/control group
+  unhealthy: "BM"     # Columns starting with this prefix are treated as unhealthy/disease group
+
+# Biological Signal Configuration
+n_H: 50
+n_U: 50
+
+# Differential Mask Options:
+# - "Null": No biological signal injected (all zeros). Useful for negative control.
+# - "All": Inject signal into all glycans (all ones).
+# - "significant": Use significant glycans marked by glycowork.motif.analysis.get_differential_expression 
+#   (using sample-size-adjusted alpha and FDR-corrected p-values via Benjamini-Hochberg or adaptive grouped methods).
+# - "Top-N": Use the top N glycans with the largest Cohen's d effect sizes (e.g., "Top-10") from glycowork.motif.analysis.get_differential_expression analysis.
+differential_mask: "significant" 
+
+# Bio Factor Parameters (Support Grid Search: list or single value)
+# Note: In hybrid mode, these control how the real bio effect sizes are injected
+bio_strength: 2   # Scaling factor for effect sizes in CLR space (1.0 = baseline median strength)
+k_dir: 200           # Dirichlet concentration 
+variance_ratio: 1.5    # k_dir_Unhealthy variance / k_dir_Healthy variance , suggestion value >= 1.0
+
+# Robust Bio Factor Processing (Advanced: rarely need to change)
+# Note: Winsorization is ALWAYS enabled (hardcoded) to handle extreme outliers robustly.
+#       Auto-selects percentile (85th-99th) based on data characteristics.
+# winsorize_percentile: 95  # Force specific percentile (e.g., 95 for moderate clipping)
+#baseline_method: "median"  # Options: "median" (default), "mad" (Median Absolute Deviation), "p75" (75 percentile) 
+
+
+# Batch Factor Parameters
+n_batches: 3
+affected_fraction: [0.05, 0.30]  # Fraction range of affected glycans per batch
+positive_prob: 0.6             # Probability of positive effects
+overlap_prob: 0.5              # Probability of overlap between batches
+
+# Batch Effect Strength (Support Grid Search: list or single value)
+kappa_mu: [ 0.5, 1.0, 1.5, 2.0 ]    # Mean shift strength, Can be single values or lists for grid search
+var_b:  [ 0.5, 1.0, 1.5, 2.0 ]      # Variance inflation factor
+
+
