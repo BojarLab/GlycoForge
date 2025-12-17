@@ -3,6 +3,9 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import warnings
+import contextlib
+import io
 from .sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_dirichlet_params_from_real_data, define_differential_mask
 from .sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
 from .utils import clr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork
@@ -21,6 +24,7 @@ def simulate(
     differential_mask=None,
     column_prefix=None,
     n_batches=3,
+    batch_effect_direction=None,
     affected_fraction=(0.05, 0.30),
     positive_prob=0.6,
     overlap_prob=0.5,
@@ -35,6 +39,21 @@ def simulate(
     save_csv=True,
     show_pca_plots=None
 ):
+    # Parse config if batch_effect_direction contains nested structure
+    if batch_effect_direction is not None and isinstance(batch_effect_direction, dict) and 'mode' in batch_effect_direction:
+        from .utils import parse_simulation_config
+        temp_config = {
+            'batch_effect_direction': batch_effect_direction,
+            'affected_fraction': affected_fraction,
+            'positive_prob': positive_prob,
+            'overlap_prob': overlap_prob
+        }
+        parsed = parse_simulation_config(temp_config)
+        batch_effect_direction = parsed.get('batch_effect_direction')
+        affected_fraction = parsed.get('affected_fraction', affected_fraction)
+        positive_prob = parsed.get('positive_prob', positive_prob)
+        overlap_prob = parsed.get('overlap_prob', overlap_prob)
+    
     # Capture original config for metadata
     differential_mask_config = differential_mask
 
@@ -98,6 +117,7 @@ def simulate(
                 'differential_mask': differential_mask,
                 'column_prefix': column_prefix,
                 'n_batches': n_batches,
+                'batch_effect_direction': batch_effect_direction,
                 'affected_fraction': affected_fraction,
                 'positive_prob': positive_prob,
                 'overlap_prob': overlap_prob,
@@ -212,13 +232,34 @@ def simulate(
         
         # Convention: group1 = disease/unhealthy (BM), group2 = control/healthy (R7)
         # This ensures positive effect sizes indicate upregulation in disease
-        results = get_differential_expression(
-            df_processed, 
-            group1=bm_cols,
-            group2=r7_cols,
-            transform="CLR",
-            impute=True
-        )
+        # Suppress glycowork output when verbose=False and capture messages
+        glycowork_messages = []
+        if not verbose:
+            stdout_capture = io.StringIO()
+            with contextlib.redirect_stdout(stdout_capture), \
+                 warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                results = get_differential_expression(
+                    df_processed, 
+                    group1=bm_cols,
+                    group2=r7_cols,
+                    transform="CLR",
+                    impute=True
+                )
+            captured_stdout = stdout_capture.getvalue().strip()
+            if captured_stdout:
+                glycowork_messages.append(f"get_differential_expression: {captured_stdout}")
+            if w:
+                for warning in w:
+                    glycowork_messages.append(f"{warning.category.__name__}: {warning.message}")
+        else:
+            results = get_differential_expression(
+                df_processed, 
+                group1=bm_cols,
+                group2=r7_cols,
+                transform="CLR",
+                impute=True
+            )
         
         # Handle cases where glycowork filters out some glycans or returns NaN
         # Create aligned effect size array matching original glycan order
@@ -319,17 +360,21 @@ def simulate(
             print(f"Effect sizes range: [{min(real_effect_sizes):.3f}, {max(real_effect_sizes):.3f}]")
     
     # Step 2: Define batch direction vectors
+    # Default: use the provided batch_effect_direction as raw value
+    batch_effect_direction_raw = batch_effect_direction
+    
     if u_dict is None:
-        u_dict = define_batch_direction(
-            batch_effects=None,
+        # Generate u_dict and get the actual raw direction (be generated in auto mode)
+        u_dict, batch_effect_direction_raw = define_batch_direction(
+            batch_effect_direction=batch_effect_direction,
             n_glycans=n_glycans,
             n_batches=n_batches,
             affected_fraction=affected_fraction,
             positive_prob=positive_prob,
             overlap_prob=overlap_prob,
-            # seed parameter removed - uses default fixed seed (42) for reproducibility
             verbose=verbose
         )
+
     
     if verbose:
         print(f"Batch direction vectors: {[len(v) for v in u_dict.values()]}")
@@ -531,6 +576,10 @@ def simulate(
             healthy_prefix_used = prefix_config.get('healthy', 'R7')
             unhealthy_prefix_used = prefix_config.get('unhealthy', 'BM')
             
+            # Add captured glycowork messages first (if any)
+            if glycowork_messages:
+                metadata['glycowork_messages'] = glycowork_messages
+            
             metadata['differential_expression_config'] = {
                 'jitter_applied': True,
                 'jitter_range': [1e-6, 1.1e-6],
@@ -549,14 +598,49 @@ def simulate(
         if bio_debug_info is not None:
             metadata['bio_injection_debug'] = bio_debug_info
         
+        # Record batch_effect_direction configuration
+        batch_direction_config = {
+            'mode': None,
+            'manual': None,
+            'auto': None
+        }
+        
+        if batch_effect_direction is not None:
+            # Manual mode: batch_effect_direction was provided
+            batch_direction_config['mode'] = 'manual'
+            batch_direction_config['manual'] = {
+                batch_id: {idx: int(direction) for idx, direction in effects.items()}
+                for batch_id, effects in batch_effect_direction.items()
+            }
+        else:
+            # Auto mode: using random generation
+            batch_direction_config['mode'] = 'auto'
+            batch_direction_config['auto'] = {
+                'affected_fraction': affected_fraction,
+                'positive_prob': positive_prob,
+                'overlap_prob': overlap_prob
+            }
+        
+        metadata['batch_parameters']['batch_effect_direction'] = batch_direction_config
+        
+        # Prepare batch_effect_direction_raw for serialization
+        batch_effect_direction_raw_serializable = None
+        if batch_effect_direction_raw is not None:
+            batch_effect_direction_raw_serializable = {
+                str(batch_id): {int(glycan_idx): int(direction) 
+                                for glycan_idx, direction in effects.items()}
+                for batch_id, effects in batch_effect_direction_raw.items()
+            }
+        
         metadata['batch_injection_debug'] = {
+            'batch_effect_direction_raw': batch_effect_direction_raw_serializable,
             'u_dict': {k: v.tolist() for k, v in u_dict.items()},
             'affected_glycans_per_batch': {k: len(v) for k, v in u_dict.items()}
         }
         
         metadata_path = f"{output_dir}/metadata_seed{seed}.json"
         with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
+            json.dump(metadata, f, indent=2, ensure_ascii=False, separators=(',', ': '))
         
         if verbose:
             print(f"Metadata saved: {metadata_path}")

@@ -1,3 +1,7 @@
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -7,14 +11,123 @@ from scipy.stats import f_oneway, shapiro, kruskal
 
 
 
+def parse_simulation_config(config):
+    """
+    Parse complete simulation configuration from YAML.
+    Handles all config transformations including batch_effect_direction expansion.
+    
+    Args:
+        config: Raw dict from yaml.safe_load()
+    
+    Returns:
+        dict: Parsed config ready for simulate() or correction pipeline
+    """
+    parsed = {}
+    
+    # Direct copy simple parameters
+    simple_params = [
+        'data_source', 'data_file', 'n_glycans', 'n_H', 'n_U',
+        'bio_strength', 'k_dir', 'variance_ratio', 'use_real_effect_sizes',
+        'differential_mask', 'column_prefix', 'n_batches',
+        'kappa_mu', 'var_b', 'winsorize_percentile', 'baseline_method',
+        'u_dict', 'random_seeds', 'output_dir', 'verbose', 'save_csv', 'show_pca_plots'
+    ]
+    
+    for key in simple_params:
+        if key in config:
+            parsed[key] = config[key]
+    
+    # Parse batch_effect_direction (complex nested structure)
+    if 'batch_effect_direction' in config:
+        bed_config = config['batch_effect_direction']
+        
+        # Get default parameters
+        affected_fraction = config.get('affected_fraction', (0.05, 0.30))
+        positive_prob = config.get('positive_prob', 0.6)
+        overlap_prob = config.get('overlap_prob', 0.5)
+        
+        manual_config, auto_params = _parse_batch_effect_direction(
+            bed_config, affected_fraction, positive_prob, overlap_prob
+        )
+        
+        # Store parsed version - pipeline.py will use this
+        parsed['batch_effect_direction'] = manual_config
+        parsed['affected_fraction'] = auto_params['affected_fraction']
+        parsed['positive_prob'] = auto_params['positive_prob']
+        parsed['overlap_prob'] = auto_params['overlap_prob']
+    else:
+        # Use defaults from config or function defaults
+        parsed['affected_fraction'] = config.get('affected_fraction', (0.05, 0.30))
+        parsed['positive_prob'] = config.get('positive_prob', 0.6)
+        parsed['overlap_prob'] = config.get('overlap_prob', 0.5)
+    
+    return parsed
+
+
+def _parse_batch_effect_direction(bed_config, affected_fraction, positive_prob, overlap_prob):
+    """
+    Internal helper to parse batch_effect_direction nested structure.
+    Expands string keys like "1-50", "3,8,12" to individual indices.
+    
+    Returns:
+        tuple: (manual_config or None, auto_params dict)
+    """
+    manual_config = None
+    auto_params = {
+        'affected_fraction': affected_fraction,
+        'positive_prob': positive_prob,
+        'overlap_prob': overlap_prob
+    }
+    
+    if not bed_config or not isinstance(bed_config, dict):
+        return manual_config, auto_params
+    
+    mode = bed_config.get('mode', 'auto')
+    
+    if mode == 'manual':
+        raw_manual = bed_config.get('manual', {})
+        if raw_manual:
+            manual_config = {}
+            
+            for batch_id, effects in raw_manual.items():
+                batch_id_int = int(batch_id)
+                manual_config[batch_id_int] = {}
+                
+                for key, direction in effects.items():
+                    if isinstance(key, str):
+                        if '-' in key and ',' not in key:
+                            start, end = map(int, key.split('-'))
+                            for idx in range(start, end + 1):
+                                manual_config[batch_id_int][idx] = int(direction)
+                        elif ',' in key:
+                            for idx in map(int, key.split(',')):
+                                manual_config[batch_id_int][idx] = int(direction)
+                        else:
+                            manual_config[batch_id_int][int(key)] = int(direction)
+                    else:
+                        manual_config[batch_id_int][int(key)] = int(direction)
+    
+    # Extract auto parameters if provided
+    auto_config = bed_config.get('auto', {})
+    if auto_config:
+        auto_params['affected_fraction'] = auto_config.get('affected_fraction', affected_fraction)
+        auto_params['positive_prob'] = auto_config.get('positive_prob', positive_prob)
+        auto_params['overlap_prob'] = auto_config.get('overlap_prob', overlap_prob)
+    
+    return manual_config, auto_params
+
+
 def load_data_from_glycowork(data_file):
     if os.path.exists(data_file):
         return pd.read_csv(data_file)
     
     # Try loading from glycowork internal datasets
     try:
-        import pkg_resources
-        glycowork_path = pkg_resources.resource_filename('glycowork', 'glycan_data')
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
+            import pkg_resources
+            glycowork_path = pkg_resources.resource_filename('glycowork', 'glycan_data')
         
         # Add .csv extension if not present
         dataset_name = data_file if data_file.endswith('.csv') else f"{data_file}.csv"

@@ -1,5 +1,5 @@
 # Config for simplified mode
-output_dir: "results/simplified_mode_new"
+output_dir: "results/simplified_mode"
 verbose: false
 save_csv: true
 show_pca_plots: false
@@ -12,20 +12,41 @@ show_pca_plots: false
 # 4. Add noise to zero-variance glycans in simulate_clean_data()
 # Note: Batch direction vectors (u_dict) are generated ONCE using ALL seeds together,
 #       ensuring consistent batch structure across all runs for fair comparison.
-random_seeds: [42, 123, 2024, 7, 99, 56, 88, 314, 271, 1618]  # Use for quick testing
+random_seeds: [42, 123, 2024, 7, 99, 56, 88, 314, 271, 1618] 
 
 data_source: simulated
-n_glycans: 50
-n_H: 50
-n_U: 50
+n_glycans: 50 # number of glycans in a single sample
+n_H: 50 # number of healthy samples to simulate
+n_U: 50 # number of unhealthy samples to simulate
 
 # Note: In simplified mode, Bio Factor parameters are NOT used 
 
+#------------------------------------------------------------
 # Batch Factor Parameters
+#------------------------------------------------------------
 n_batches: 3
-affected_fraction: [0.1, 0.5]  # Fraction range of affected glycans per batch
-positive_prob: 0.6             # Probability of positive effects
-overlap_prob: 0.5              # Probability of overlap between batches
+
+# Batch Effect Direction Configuration
+batch_effect_direction:
+  mode: "auto"  # Options: "manual" or "auto"
+  manual: # +1 = up-regulation, -1 = down-regulation
+    1:
+      5: 1          # Glycan 5 up-regulated in batch 1
+      10: -1        # Glycan 10 down-regulated in batch 1
+      "15,20,25": 1 # Glycans 15,20,25 up-regulated (comma-separated)
+    2:
+      "3,8": 1      # Glycans 3,8 up-regulated in batch 2
+      12: -1        # Glycan 12 down-regulated in batch 2
+    3:
+      "1-30": 1     # Glycans 1-30 up-regulated (range notation)
+      "31-50": -1   # # Glycans 31-50 down-regulated (range notation)
+  
+  # Auto mode: random generation with constraints
+  auto:
+    affected_fraction: [0.05, 1]  # Fraction range of affected glycans per batch
+    positive_prob: 0.6               # Probability of positive effects
+    overlap_prob: 0.5                # Probability of overlap between batches
+
 
 # Batch Effect Strength (Support Grid Search: list or single value)
 kappa_mu: [0.5, 1.0 , 1.5, 2.0]  # Mean shift strength control per batch = kappa_mu * sigma * u_b

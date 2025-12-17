@@ -4,10 +4,10 @@ from .utils import invclr
 
 
 def define_batch_direction(
-        batch_effects=None,           # Fixed config (backward compatible)
+        batch_effect_direction=None,  # Manual mode: dict {batch_id: {glycan_index (1-based): direction (+1/-1)}}
         n_glycans=50,                 # Total number of glycans
         n_batches=3,                  # Number of batches (for random mode)
-        affected_fraction=(0.02, 0.20), # Fraction range of affected glycans per batch
+        affected_fraction=(0.05, 1), # Fraction range of affected glycans per batch
         positive_prob=0.6,            # Probability of positive effects
         overlap_prob=0.2,             # Probability of overlap between batches
         u_dict_seed=42,               # Fixed seed for reproducible batch effect structure
@@ -15,10 +15,10 @@ def define_batch_direction(
         verbose=False                 # Print generated config
         ):
     
-    # Generate random batch_effects if not provided
-    if batch_effects is None:
+    # Generate random batch_effect_direction if not provided
+    if batch_effect_direction is None:
         rng = np.random.default_rng(u_dict_seed)
-        batch_effects = {}
+        batch_effect_direction = {}
         all_affected = set()
         
         for batch_id in range(1, n_batches + 1):
@@ -42,19 +42,19 @@ def define_batch_direction(
             directions = rng.choice([-1, 1], size=len(affected_glycans), 
                                   p=[1-positive_prob, positive_prob])
             
-            batch_effects[batch_id] = {int(g+1): int(d) for g, d in zip(affected_glycans, directions)}
+            batch_effect_direction[batch_id] = {int(g+1): int(d) for g, d in zip(affected_glycans, directions)}
             all_affected.update(affected_glycans)
         
         if verbose:
-            print("Generated random batch effects:")
-            for bid, effects in batch_effects.items():
+            print("Generated random batch effect directions:")
+            for bid, effects in batch_effect_direction.items():
                 pos = sum(1 for d in effects.values() if d > 0)
                 neg = sum(1 for d in effects.values() if d < 0)
                 print(f"  Batch {bid}: {len(effects)} glycans ({pos}↑, {neg}↓)")
     
     # Convert to direction vectors (original logic)
     u_dict = {}
-    for b, effects in batch_effects.items():
+    for b, effects in batch_effect_direction.items():
         w = np.zeros(n_glycans)
         for j, d in effects.items():
             w[j-1] = d   
@@ -63,10 +63,9 @@ def define_batch_direction(
             norm = np.sqrt(np.mean(w_tilde**2))
             w = w_tilde / norm if norm > 0 else w_tilde
         u_dict[b] = w
-    return u_dict
-
-
-
+    
+    # Return both normalized u_dict and raw batch_effect_direction
+    return u_dict, batch_effect_direction
 
 
 # according to column name "healthy_" and "unhealthy_"

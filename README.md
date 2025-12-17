@@ -59,9 +59,9 @@ There are 2 mode in simulation pipeline `glycoforge/pipeline.py::simulate` entry
   5. Processes effect sizes through `robust_effect_size_processing`:
      - Centers effect sizes to remove global shift
      - Applies Winsorization to clip extreme outliers (auto-selects percentile 85-99 based on outlier severity, or uses `winsorize_percentile` if specified)
-     - Normalizes by baseline (median, MAD, or 75th percentile via `baseline_method`)
+     - Normalizes by baseline (median, Median Absolute Deviation, or 75th percentile via `baseline_method`)
      - Returns normalized effect sizes `d_robust` that caller scales by `bio_strength`
-  6. Injects effects in CLR space: `z_U = z_H + m * bio_strength * d_robust`, where `z_H` is the healthy baseline CLR, `m` is the differential mask
+  6. Injects effects in CLR space: `z_U = z_H + mask * bio_strength * d_robust`, where `z_H` is the healthy baseline CLR, `m` is the differential mask
   7. Converts back to proportions: `p_U = invclr(z_U)`
   8. Scales by Dirichlet concentration: `alpha_H = k_dir * p_H` and `alpha_U = (k_dir / variance_ratio) * p_U`
   9. Samples clean cohorts from `Dirichlet(alpha_H)` and `Dirichlet(alpha_U)` with `n_H` healthy and `n_U` unhealthy samples

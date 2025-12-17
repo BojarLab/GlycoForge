@@ -6,11 +6,13 @@ __version__ = "0.1.0"
 from .pipeline import simulate
 
 # Utility functions
-from .utils import clr, invclr
+from .utils import clr, invclr, parse_simulation_config, plot_pca
 
 # Expose core API
 __all__ = [
     'simulate', 
     'clr', 
-    'invclr'
+    'invclr',
+    'parse_simulation_config',
+    'plot_pca'
 ]

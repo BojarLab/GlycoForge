@@ -4,13 +4,15 @@ import os
 import pandas as pd
 from datetime import datetime
 from sklearn.decomposition import PCA
-from scipy.stats import f_oneway, shapiro, kruskal
 from sklearn.metrics import silhouette_score, adjusted_rand_score
 from sklearn.neighbors import NearestNeighbors
 from scipy.spatial.distance import squareform, pdist
 from sklearn.cluster import KMeans
 from glycowork.motif.analysis import get_differential_expression
 from glycoforge.sim_bio_factor import create_bio_groups
+import contextlib
+import io
+import warnings
 
 
 def pca_batch_effect(data, batch):
@@ -342,10 +344,53 @@ def compare_differential_expression(dataset1=None, #simulated clean data
             print(f"Dataset 3 zero/negative values: {(df3.iloc[:, 1:] <= 0).sum().sum()}")
     
     # Perform differential expression analysis
-    res1 = get_differential_expression(df=df1, group1=groups1['Healthy'], group2=groups1['Unhealthy'], transform="CLR", motifs=False)
-    res2 = get_differential_expression(df=df2, group1=groups2['Healthy'], group2=groups2['Unhealthy'], transform="CLR", motifs=False)
+    # Capture glycowork output messages and warnings
+    captured_messages = []
+    captured_warnings = []
+    
+    f1 = io.StringIO()
+    with contextlib.redirect_stdout(f1), warnings.catch_warnings(record=True) as w1:
+        warnings.simplefilter("always")
+        res1 = get_differential_expression(df=df1, group1=groups1['Healthy'], group2=groups1['Unhealthy'], transform="CLR", motifs=False)
+    msg1 = f1.getvalue().strip()
+    if msg1:
+        captured_messages.append(f"Dataset1 ({dataset1_name}): {msg1}")
+    if w1:
+        for warning in w1:
+            captured_warnings.append(f"Dataset1 ({dataset1_name}): {warning.category.__name__}: {warning.message}")
+    
+    f2 = io.StringIO()
+    with contextlib.redirect_stdout(f2), warnings.catch_warnings(record=True) as w2:
+        warnings.simplefilter("always")
+        res2 = get_differential_expression(df=df2, group1=groups2['Healthy'], group2=groups2['Unhealthy'], transform="CLR", motifs=False)
+    msg2 = f2.getvalue().strip()
+    if msg2:
+        captured_messages.append(f"Dataset2 ({dataset2_name}): {msg2}")
+    if w2:
+        for warning in w2:
+            captured_warnings.append(f"Dataset2 ({dataset2_name}): {warning.category.__name__}: {warning.message}")
+    
     if df3 is not None:
-        res3 = get_differential_expression(df=df3, group1=groups3['Healthy'], group2=groups3['Unhealthy'], transform="CLR", motifs=False)
+        f3 = io.StringIO()
+        with contextlib.redirect_stdout(f3), warnings.catch_warnings(record=True) as w3:
+            warnings.simplefilter("always")
+            res3 = get_differential_expression(df=df3, group1=groups3['Healthy'], group2=groups3['Unhealthy'], transform="CLR", motifs=False)
+        msg3 = f3.getvalue().strip()
+        if msg3:
+            captured_messages.append(f"Dataset3 ({dataset3_name}): {msg3}")
+        if w3:
+            for warning in w3:
+                captured_warnings.append(f"Dataset3 ({dataset3_name}): {warning.category.__name__}: {warning.message}")
+    
+    if verbose:
+        if captured_messages:
+            print("\nDifferential expression analysis messages:")
+            for msg in captured_messages:
+                print(f"  {msg}")
+        if captured_warnings:
+            print("\nWarnings during analysis:")
+            for warn in captured_warnings:
+                print(f"  {warn}")
     
     # Extract significant glycan indices
     sig1 = sorted([idx + 1 for idx in res1[res1['significant'] == True].index])
@@ -367,7 +412,9 @@ def compare_differential_expression(dataset1=None, #simulated clean data
             "dataset1_path": dataset1_path if dataset1_path else "memory",
             "dataset2_path": dataset2_path if dataset2_path else "memory",
             "total_glycans": len(res1),
-            "bio_groups": {k: len(v) for k, v in groups1.items()}
+            "bio_groups": {k: len(v) for k, v in groups1.items()},
+            "analysis_messages": captured_messages if captured_messages else [],
+            "warnings": captured_warnings if captured_warnings else []
         },
         "results": {
             "dataset1": {
@@ -504,25 +551,45 @@ def quantify_batch_effect_impact(Y_with_batch_clr, #DataFrame (glycans x samples
 
 
 
-def evaluate_biological_preservation(clean_data, corrected_data, bio_labels):
+def evaluate_biological_preservation(clean_data, with_batch_data, corrected_data, bio_labels):
     
-    # 1. Preservation of Biological Variability
-    bio_preservation = preservation_of_biological_variability(
-        data_before=clean_data.T.values,     # Convert to samples x features
-        data_after=corrected_data.T.values,
-        biological_groups=bio_labels  # Direct use of 0-based labels
+    # Calculate Y_with_batch vs Y_clean (baseline corruption)
+    bio_var_batch_vs_clean = preservation_of_biological_variability(
+        data_before=clean_data.T.values,
+        data_after=with_batch_data.T.values,
+        biological_groups=bio_labels
     )
     
-    # 2. Proportion of Conserved Differential Features
-    conserved_prop = proportion_conserved_differential(
-        data_before=clean_data.T.values,      # Convert to samples x features
+    conserved_batch_vs_clean = proportion_conserved_differential(
+        data_before=clean_data.T.values,
+        data_after=with_batch_data.T.values,
+        threshold=0.05
+    )
+    
+    # Calculate Y_corrected vs Y_clean (correction effectiveness)
+    bio_var_corrected_vs_clean = preservation_of_biological_variability(
+        data_before=clean_data.T.values,
+        data_after=corrected_data.T.values,
+        biological_groups=bio_labels
+    )
+    
+    conserved_corrected_vs_clean = proportion_conserved_differential(
+        data_before=clean_data.T.values,
         data_after=corrected_data.T.values,
         threshold=0.05
     )
     
     return {
-        'biological_variability_preservation': bio_preservation,
-        'conserved_differential_proportion': conserved_prop
+        'batch_vs_clean': {
+            'description': 'Y_with_batch vs Y_clean (baseline corruption level)',
+            'biological_variability': bio_var_batch_vs_clean,
+            'conserved_differential': conserved_batch_vs_clean
+        },
+        'corrected_vs_clean': {
+            'description': 'Y_corrected vs Y_clean (after batch correction)',
+            'biological_variability': bio_var_corrected_vs_clean,
+            'conserved_differential': conserved_corrected_vs_clean
+        }
     }
 
 
@@ -530,11 +597,8 @@ def generate_comprehensive_metrics(seed, output_dir,
                                  batch_metrics_before,
                                  batch_metrics_after,
                                  diff_expr_results,
-                                 run_config,
+                                 metadata,
                                  batch_check_results=None):
-    
-    # Extract parameters from run_config
-    params = run_config.get('key_parameters', {})
     
     # Build run_info
     run_info = {
@@ -543,47 +607,21 @@ def generate_comprehensive_metrics(seed, output_dir,
         "output_dir": output_dir
     }
     
-    # Build simulation_config
+    # Build simulation_config directly from metadata
     simulation_config = {
-        "data_source": params.get('data_source', 'simulated'),
-        "bio_parameters": {
-            "n_H": params.get('n_H', 15),
-            "n_U": params.get('n_U', 15),
-            "bio_strength": params.get('bio_strength', 1.5),
-            "k_dir": params.get('k_dir', 100),
-            "k_dir_H": params.get('k_dir_H', params.get('k_dir', 100)),
-            "k_dir_U": params.get('k_dir_U', params.get('k_dir', 100) / params.get('variance_ratio', 1.5)),
-            "variance_ratio": params.get('variance_ratio', 1.5),
-            "differential_mask_config": params.get('differential_mask_config', 'All')
-        },
-        "batch_parameters": {
-            "n_batches": params.get('n_batches', 3),
-            "kappa_mu": params.get('kappa_mu', 1.0),
-            "var_b": params.get('var_b', 0.5),
-            "affected_fraction": params.get('affected_fraction', [0.05, 0.30]),
-            "positive_prob": params.get('positive_prob', 0.6),
-            "overlap_prob": params.get('overlap_prob', 0.5)
-        }
+        "data_source": metadata.get('data_source', 'simulated'),
+        "bio_parameters": metadata.get('bio_parameters', {}),
+        "batch_parameters": metadata.get('batch_parameters', {})
     }
     
     # Add hybrid mode specific parameters
-    if params.get('data_source') == 'real':
-        simulation_config['data_file'] = params.get('data_file')
-        simulation_config['use_real_effect_sizes'] = params.get('use_real_effect_sizes', False)
-        if params.get('column_prefix'):
-            simulation_config['column_prefix'] = params.get('column_prefix')
-        if params.get('winsorize_percentile'):
-            simulation_config['bio_parameters']['winsorize_percentile'] = params.get('winsorize_percentile')
-        if params.get('baseline_method'):
-            simulation_config['bio_parameters']['baseline_method'] = params.get('baseline_method')
+    if metadata.get('data_source') == 'real':
+        simulation_config['data_file'] = metadata.get('data_file')
+        simulation_config['use_real_effect_sizes'] = metadata.get('use_real_effect_sizes', False)
+        if metadata.get('column_prefix'):
+            simulation_config['column_prefix'] = metadata.get('column_prefix')
     
-    # Extract bio preservation metrics from batch_metrics_after
-    bio_preservation = {
-        "biological_variability_preservation": batch_metrics_after.pop('biological_variability_preservation', None),
-        "conserved_differential_proportion": batch_metrics_after.pop('conserved_differential_proportion', None)
-    }
-    # Remove None values
-    bio_preservation = {k: v for k, v in bio_preservation.items() if v is not None}
+    bio_preservation = batch_metrics_after.pop('bio_preservation', {})
     
     # Calculate improvement metrics for all 6 batch correction metrics
     improvement = {}
@@ -766,6 +804,12 @@ def generate_comprehensive_metrics(seed, output_dir,
         
         correction_results['differential_expression'] = de_processed
     
+    # Add quality_checks if available
+    if batch_check_results:
+        correction_results["quality_checks"] = {
+            "Y_with_batch": batch_check_results
+        }
+    
     # Assemble final structure
     correction_data = {
         "run_info": run_info,
@@ -775,7 +819,7 @@ def generate_comprehensive_metrics(seed, output_dir,
     
     output_file = f"{output_dir}/correction_metrics_seed{seed}.json"
     with open(output_file, 'w') as f:
-        json.dump(correction_data, f, indent=2)
+        json.dump(correction_data, f, indent=2, ensure_ascii=False)
     
     print(f"Correction metrics saved to: {output_file}")
     

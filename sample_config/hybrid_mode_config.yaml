@@ -1,5 +1,5 @@
 # Config for Hybrid Mode 
-output_dir: "results/hybrid_mode_batch_N"
+output_dir: "results/hybrid_mode_batch_O"
 verbose: false
 save_csv: true
 show_pca_plots: false
@@ -17,20 +17,21 @@ random_seeds: [42, 123, 2024, 7, 99, 56, 88, 314, 271, 1618]
 
 
 # Data Source Configuration
-data_source: "real"
-# data_file can be either:
 #   - Local file path: "path/to/file_name.csv"
 #   - Glycowork built-in dataset: "glycomics_human_leukemia_O_PMID34646384" (with or without .csv)
-data_file: "glycomics_human_leukemia_N_PMID34646384.csv"  #glycomics_human_liver_O_PMC5383776.csv
+data_source: "real"
+data_file: "glycomics_human_leukemia_O_PMID34646384.csv"  #glycomics_human_liver_O_PMC5383776.csv
 use_real_effect_sizes: true # false = use uniform effect sizes for all bio-significant glycans
-# Column prefix mapping for real data (optional, defaults: healthy="R7", unhealthy="BM")
 column_prefix:
   healthy: "R7"       # Columns starting with this prefix are treated as healthy/control group
   unhealthy: "BM"     # Columns starting with this prefix are treated as unhealthy/disease group
 
-# Biological Signal Configuration
-n_H: 50
-n_U: 50
+n_H: 50 # number of healthy samples to simulate
+n_U: 50 # number of unhealthy samples to simulate
+
+#------------------------------------------------------------
+# Biological Factor Parameters
+#------------------------------------------------------------
 
 # Differential Mask Options:
 # - "Null": No biological signal injected (all zeros). Useful for negative control.
@@ -50,14 +51,36 @@ variance_ratio: 1.5    # k_dir_Unhealthy variance / k_dir_Healthy variance , sug
 # Note: Winsorization is ALWAYS enabled (hardcoded) to handle extreme outliers robustly.
 #       Auto-selects percentile (85th-99th) based on data characteristics.
 # winsorize_percentile: 95  # Force specific percentile (e.g., 95 for moderate clipping)
-#baseline_method: "median"  # Options: "median" (default), "mad" (Median Absolute Deviation), "p75" (75 percentile) 
+# baseline_method: "median"  # Options: "median" (default), "mad" (Median Absolute Deviation), "p75" (75 percentile) 
 
-
+#------------------------------------------------------------
 # Batch Factor Parameters
+#------------------------------------------------------------
 n_batches: 3
-affected_fraction: [0.05, 0.30]  # Fraction range of affected glycans per batch
-positive_prob: 0.6             # Probability of positive effects
-overlap_prob: 0.5              # Probability of overlap between batches
+
+# Batch Effect Direction Configuration
+
+# Batch Effect Direction Configuration
+batch_effect_direction:
+  mode: "auto"  # Options: "manual" or "auto"
+  manual: # +1 = up-regulation, -1 = down-regulation
+    1:
+      5: 1          # Glycan 5 up-regulated in batch 1
+      10: -1        # Glycan 10 down-regulated in batch 1
+      "15,20,25": 1 # Glycans 15,20,25 up-regulated (comma-separated)
+    2:
+      "3,8": 1      # Glycans 3,8 up-regulated in batch 2
+      12: -1        # Glycan 12 down-regulated in batch 2
+    3:
+      "1-30": 1     # Glycans 1-30 up-regulated (range notation)
+      "31-50": -1   # # Glycans 31-50 down-regulated (range notation)
+  
+  # Auto mode: random generation with constraints
+  auto:
+    affected_fraction: [0.05, 1]  # Fraction range of affected glycans per batch
+    positive_prob: 0.6               # Probability of positive effects
+    overlap_prob: 0.5                # Probability of overlap between batches
+
 
 # Batch Effect Strength (Support Grid Search: list or single value)
 kappa_mu: [ 0.5, 1.0, 1.5, 2.0 ]    # Mean shift strength, Can be single values or lists for grid search
