@@ -7,8 +7,8 @@ name = "glycoforge"
 version = "0.1.0"
 description = "A simulation tool for generating glycomic relative abundance datasets with customizable biological group differences and controllable batch-effect injection"
 readme = "README.md"
-requires-python = ">=3.10,<3.11"
-license = {text = "MIT"}
+requires-python = ">=3.10,<3.13"
+license = "MIT"
 authors = [{name = "Zoe (Siyu) Hu", email = "zoe.sy.hu@gmail.com"}]
 
 dependencies = [
@@ -24,3 +24,6 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/BojarLab/GlycoForge"
 Repository = "https://github.com/BojarLab/GlycoForge"
+
+[tool.setuptools.packages.find]
+include = ["glycoforge*"]
