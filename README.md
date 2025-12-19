@@ -1,4 +1,4 @@
-![logo](glycoforge_logo.jpg)
+<img src="glycoforge_logo.jpg" alt="GlycoForge logo" width="200">
 
 GlycoForge is a simulation tool for **generating glycomic relative-abundance datasets** with customizable biological group differences and controllable batch-effect injection.
 
