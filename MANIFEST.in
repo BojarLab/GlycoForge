@@ -1,0 +1,13 @@
+include README.md
+include LICENSE
+include pyproject.toml
+recursive-include glycoforge *.py
+recursive-include sample_config *.yaml
+recursive-exclude tests *
+recursive-exclude results *
+recursive-exclude .venv *
+recursive-exclude use_cases *
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude .DS_Store

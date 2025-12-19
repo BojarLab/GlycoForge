@@ -25,7 +25,7 @@ def simulate(
     column_prefix=None,
     n_batches=3,
     batch_effect_direction=None,
-    affected_fraction=(0.05, 0.30),
+    affected_fraction=(0.05, 1),
     positive_prob=0.6,
     overlap_prob=0.5,
     kappa_mu=1.0,
@@ -235,7 +235,7 @@ def simulate(
             print(f"  - group2 (control/healthy): {len(r7_cols)} samples (expected: {healthy_prefix})")
             print(f"    → {r7_cols[:min(3, len(r7_cols))]}...")
             print(f"  - transform='CLR', impute=True")
-            print(f"  ⚠️  Effect size convention: positive = upregulated in disease")
+            print(f"    [WARNING] Effect size convention: positive = upregulated in disease")
 
         # Convention: group1 = disease/unhealthy (BM), group2 = control/healthy (R7)
         # This ensures positive effect sizes indicate upregulation in disease
