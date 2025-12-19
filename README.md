@@ -16,12 +16,20 @@ GlycoForge is a simulation tool for **generating glycomic relative-abundance dat
 * Core dependency: `glycowork>=1.6.4`
 
 ```bash
+pip install glycoforge
+```
+
+OR 
+
+```bash
 git clone https://github.com/BojarLab/GlycoForge.git
 cd GlycoForge
 python3.10 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
+
+
 
 ### Usage
 

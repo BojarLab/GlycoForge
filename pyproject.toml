@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "glycoforge"
-version = "0.1.0"
+version = "0.1.2"
 description = "A simulation tool for generating glycomic relative abundance datasets with customizable biological group differences and controllable batch-effect injection"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = {text = "MIT"}
-authors = [{name = "Zoe (Siyu) Hu", email = "zoe.sy.hu@gmail.com"}]
-keywords = ["glycomics", "simulation", "batch-effect", "compositional-data", "bioinformatics", "MNAR","relative-abundance data"]
+authors = [{name = "Zoe (Siyu) Hu", email = "zoe.sy.hu@gmail.com"}, {name = "Daniel Bojar", email = "daniel.bojar@gu.se"}]
+keywords = ["glycomics", "simulation","relative-abundance data" ,"batch-effect", "compositional-data", "bioinformatics", "MNAR"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -44,5 +44,11 @@ Repository = "https://github.com/BojarLab/GlycoForge"
 Documentation = "https://github.com/BojarLab/GlycoForge#readme"
 "Bug Tracker" = "https://github.com/BojarLab/GlycoForge/issues"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 include = ["glycoforge*"]
+
+[tool.setuptools.package-data]
+glycoforge = ["sample_config/*.yaml"]

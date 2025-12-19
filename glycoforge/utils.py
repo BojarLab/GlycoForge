@@ -143,7 +143,20 @@ def load_data_from_glycowork(data_file):
     return pd.read_csv(data_file)
 
 def clr(x, eps=1e-6):
-    x = np.asarray(x)
+    """Centered log-ratio transformation for compositional data.
+    
+    Parameters:
+    -----------
+    x : array-like
+        Compositional data. Can be 1D (single sample) or 2D (samples x features).
+    eps : float
+        Small value to replace zeros (default 1e-6).
+    Returns:
+    --------
+    clr_transformed : np.ndarray
+        CLR-transformed data with same shape as input.
+    """
+    x = np.asarray(x, dtype=float)
 
     # Handle zeros by replacing with small epsilon
     x_safe = np.where(x <= 0, eps, x)
@@ -151,12 +164,12 @@ def clr(x, eps=1e-6):
     # Standard CLR: log(x) - geometric_mean(log(x))
     log_x = np.log(x_safe)
     if x.ndim == 1:
-        # Single sample
+        # Single sample: subtract mean across all features
         geom_mean_log = np.mean(log_x)
         return log_x - geom_mean_log
     else:
-        # Multiple samples - compute geometric mean across features (axis=0)
-        geom_mean_log = np.mean(log_x, axis=0)
+        # Multiple samples: subtract mean across features for each sample (axis=1)
+        geom_mean_log = np.mean(log_x, axis=1, keepdims=True)
         return log_x - geom_mean_log
 
 def invclr(z, to_percent=True, eps=1e-6):
@@ -390,28 +403,22 @@ def check_batch_effect(data,
                 else:
                     severity = "MILD"
                 severity_description = f"Batch effect ({batch_eta:.1%}) stronger than biological signal ({bio_eta:.1%})"
-                if verbose:
-                    print(f"Warning: {severity_description} - {severity}")
             else:
                 severity = "GOOD"
                 severity_description = f"Biological signal ({bio_eta:.1%}) stronger than batch effect ({batch_eta:.1%})"
-                if verbose:
-                    print(f"Good: {severity_description}")
         elif p_val < 0.05 and p_bio >= 0.05:
             severity = "WARNING"
             severity_description = "Significant batch effect detected, but no significant biological signal"
-            if verbose:
-                print(f"Warning: {severity_description}")
         elif p_val >= 0.05 and p_bio < 0.05:
             severity = "GOOD"
             severity_description = "Biological signal detected without significant batch effect"
-            if verbose:
-                print(f"Good: {severity_description}")
         else:
             severity = "NONE"
             severity_description = "Neither batch nor biological effects are statistically significant"
-            if verbose:
-                print(f"Note: {severity_description}")
+
+        if verbose:
+            print(f"\nOverall Quality: {severity} - {severity_description}")
+            print(f"  (Decision criteria: batch_p={p_val:.3e}, bio_p={p_bio:.3e}, batch_eta²={batch_eta:.1%}, bio_eta²={bio_eta:.1%})")
 
         # Median variance explained by batch
         batch_dummies = pd.get_dummies(batch_labels).values
