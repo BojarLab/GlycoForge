@@ -1,6 +1,6 @@
-<img src="glycoforge_logo.jpg" alt="GlycoForge logo" width="200">
+<img src="glycoforge_logo.jpg" alt="GlycoForge logo" width="300">
 
-GlycoForge is a simulation tool for **generating glycomic relative-abundance datasets** with customizable biological group differences and controllable batch-effect injection.
+**GlycoForge** is a simulation tool for **generating glycomic relative-abundance datasets** with customizable biological group differences and controllable batch-effect injection.
 
 ## Key Features
 
@@ -119,11 +119,10 @@ Starts from real glycomics data to preserve biological signal structure. Accepts
 ## Use Cases
 
 The [use_cases/batch_correction/](use_cases/batch_correction) directory demonstrates:
-- Call `glycoforge` simulation + ComBat correction workflow
+- Call `glycoforge` simulation, and then apply correction workflow
 - Batch correction effectiveness metrics visualization
 
 
-## Limitations and Future Work
+## Limitation
 
-1. **Two biological groups only**: Current implementation targets healthy/unhealthy setup. Supporting multi-stage disease (>=3 groups) requires refactoring Dirichlet parameter generation and evaluation metrics.
-2. **Packaging**: Source-first distribution for now. PyPI release planned once API stabilizes.
+**Two biological groups only**: Current implementation targets healthy/unhealthy setup. Supporting multi-stage disease (>=3 groups) requires refactoring Dirichlet parameter generation and evaluation metrics.
