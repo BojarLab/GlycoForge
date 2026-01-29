@@ -115,30 +115,32 @@ def apply_batch_effect(Y_clean # (samples x glycans) clean CLR matrix
                        , var_b # variance ratio per batch (var_effect = var_b * baseline_variance)
                        , seed=42 # Random generator for reproducibility
                     ):
-
     rng = np.random.default_rng(seed)
-
     Y_with_batch_clr = Y_clean.copy()
     n_samples, n_glycans = Y_clean.shape
-    
+    # Generate batch-specific variance multipliers (moderate heteroscedasticity)
+    # Each batch gets a fixed multiplier spread around 1.0
+    unique_batches = sorted(u_dict.keys())
+    n_batches = len(unique_batches)
+    batch_var_scales = {}
+    for idx, b in enumerate(unique_batches):
+        # Spread batches evenly around 1.0: e.g. [1-var_b, 1, 1+var_b] for 3 batches
+        # This creates detectable variance differences without explosion
+        offset = (idx - (n_batches-1)/2) / ((n_batches-1)/2 + 1e-6) * var_b
+        batch_var_scales[b] = max(0.1, 1.0 + offset)  # Clamp to avoid negative
     for i in range(n_samples):
         b = batch_labels[i]
         if b not in u_dict:
             continue
         u_b = u_dict[b]
-        
         # mean shift term
         mean_shift = kappa_mu * sigma * u_b
-        
-        # variance scaling term (extra noise)
-        var_scalor = rng.normal(loc=0.0, scale=np.sqrt(var_b) * sigma, size=n_glycans)
-        
+        # variance inflation (batch-specific scale)
+        var_scale = batch_var_scales[b]
+        var_scalor = rng.normal(loc=0.0, scale=np.sqrt(var_scale) * sigma, size=n_glycans)
         # apply to sample
         Y_with_batch_clr[i, :] += mean_shift + var_scalor
-
-    
     Y_with_batch_compositional = np.zeros_like(Y_with_batch_clr)
     for i in range(n_samples):
         Y_with_batch_compositional[i, :] = invclr(Y_with_batch_clr[i, :])  # Scale to percentage
-
     return Y_with_batch_clr, Y_with_batch_compositional
