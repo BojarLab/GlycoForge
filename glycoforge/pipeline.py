@@ -6,9 +6,9 @@ import json
 import warnings
 import contextlib
 import io
-from .sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_dirichlet_params_from_real_data, define_differential_mask
-from .sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
-from .utils import clr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness
+from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_dirichlet_params_from_real_data, define_differential_mask
+from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
+from glycoforge.utils import clr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness
 
 
 def simulate(

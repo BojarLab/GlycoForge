@@ -340,115 +340,157 @@ def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samp
     }
 
 
-def check_batch_effect(data,
-                       batch_labels,
-                       bio_groups=None,
-                       verbose=True
-                       ):
+def pvca_variance_decomposition(data, batch_labels, bio_labels, n_components=10):
+  X = np.asarray(data).T
+  pca = PCA(n_components=min(n_components, X.shape[0]-1, X.shape[1]))
+  pc_scores = pca.fit_transform(X)
+  variance_explained = pca.explained_variance_ratio_
+  batch_variance = 0
+  bio_variance = 0
+  residual_variance = 0
+  for i in range(pc_scores.shape[1]):
+    pc = pc_scores[:, i]
+    weight = variance_explained[i]
+    ss_total = np.sum((pc - np.mean(pc))**2)
+    if ss_total < 1e-10:
+      continue
+    batch_means = np.array([np.mean(pc[batch_labels == b]) for b in np.unique(batch_labels)])
+    batch_counts = np.array([np.sum(batch_labels == b) for b in np.unique(batch_labels)])
+    ss_batch = np.sum(batch_counts * (batch_means - np.mean(pc))**2)
+    bio_means = np.array([np.mean(pc[bio_labels == b]) for b in np.unique(bio_labels)])
+    bio_counts = np.array([np.sum(bio_labels == b) for b in np.unique(bio_labels)])
+    ss_bio = np.sum(bio_counts * (bio_means - np.mean(pc))**2)
+    ss_residual = max(0, ss_total - ss_batch - ss_bio)
+    batch_variance += (ss_batch / ss_total) * weight
+    bio_variance += (ss_bio / ss_total) * weight
+    residual_variance += (ss_residual / ss_total) * weight
+  total = batch_variance + bio_variance + residual_variance
+  if total < 1e-10:
+    return {'batch_variance_pct': 0.0, 'bio_variance_pct': 0.0, 'residual_variance_pct': 0.0}
+  return {
+    'batch_variance_pct': (batch_variance / total) * 100,
+    'bio_variance_pct': (bio_variance / total) * 100,
+    'residual_variance_pct': (residual_variance / total) * 100
+  }
 
-    pc, var_explained, total_samples, norm_p, X = _compute_pca_and_stats(data)
 
-    # Batch effect evaluation
-    batch_cat = pd.Categorical(batch_labels)
-    pc1_by_batch = [pc[batch_cat==b, 0] for b in batch_cat.categories]
-
-    # Choose test
-    if total_samples < 30 or norm_p < 0.05:
-        f_stat, p_val = kruskal(*pc1_by_batch)
-        test_used = "Kruskal-Wallis"
+def check_batch_effect(data, batch_labels, bio_groups=None, verbose=True):
+  pc, var_explained, total_samples, norm_p, X = _compute_pca_and_stats(data)
+  
+  # Handle both bio_groups (dict) and bio_labels (array) inputs
+  if bio_groups is not None:
+    if isinstance(bio_groups, dict):
+      # Convert bio_groups dict to bio_labels array
+      bio_labels = np.zeros(len(data.columns), dtype=int)
+      for group_id, (group_name, cols) in enumerate(bio_groups.items()):
+        for col in cols:
+          if col in data.columns:
+            col_idx = data.columns.get_loc(col)
+            bio_labels[col_idx] = group_id
+      bio_groups_dict = bio_groups
     else:
-        f_stat, p_val = f_oneway(*pc1_by_batch)
-        test_used = "ANOVA"
-
-    # Batch eta²
-    ss_total = np.var(pc[:, 0]) * (len(pc[:, 0]) - 1)
-    if test_used == "ANOVA":
-        ss_between = sum([len(group) * (np.mean(group) - np.mean(pc[:, 0]))**2
-                         for group in pc1_by_batch])
-        batch_eta = ss_between / ss_total if ss_total > 0 else 0
-    else:
-        batch_eta = (f_stat - len(batch_cat.categories) + 1) / (total_samples - len(batch_cat.categories) + 1)
-        batch_eta = max(0, min(1, batch_eta))
-
+      # Already bio_labels array, keep it
+      bio_labels = bio_groups
+      bio_groups_dict = None
+  else:
+    bio_labels = None
+    bio_groups_dict = None
+  
+  # PVCA as primary metric
+  if bio_labels is not None:
+    pvca_results = pvca_variance_decomposition(data, batch_labels, bio_labels, n_components=10)
+    batch_var_pct = pvca_results['batch_variance_pct']
+    bio_var_pct = pvca_results['bio_variance_pct']
+    residual_var_pct = pvca_results['residual_variance_pct']
+    
     if verbose:
-        print(f"PC1-2 explain {var_explained:.1%} variance")
-        print(f"Batch effect on PC1: F={f_stat:.2f}, p={p_val:.3e} ({test_used})")
-        print(f"Batch effect size (eta²): {batch_eta:.1%}")
-
-    results = {
-        'pca_variance_explained': float(var_explained),
-        'batch_effect': {
-            'f_statistic': float(f_stat),
-            'p_value': float(p_val),
-            'test_used': test_used,
-            'effect_size_eta2': float(batch_eta)
-        }
-    }
-
-    # Bio effect evaluation (if provided)
-    if bio_groups is not None:
-        bio_effect = _evaluate_bio_effect_details(pc, bio_groups, test_used, ss_total, total_samples, verbose)
-        results['bio_effect'] = bio_effect
-
-        # Overall quality assessment
-        bio_eta = bio_effect['effect_size_eta2']
-        p_bio = bio_effect['p_value']
-
-        if p_val < 0.05 and p_bio < 0.05:
-            if batch_eta > bio_eta + 0.1:
-                if batch_eta > 0.3:
-                    severity = "CRITICAL"
-                elif batch_eta > 0.2:
-                    severity = "MODERATE"
-                else:
-                    severity = "MILD"
-                severity_description = f"Batch effect ({batch_eta:.1%}) stronger than biological signal ({bio_eta:.1%})"
-            else:
-                severity = "GOOD"
-                severity_description = f"Biological signal ({bio_eta:.1%}) stronger than batch effect ({batch_eta:.1%})"
-        elif p_val < 0.05 and p_bio >= 0.05:
-            severity = "WARNING"
-            severity_description = "Significant batch effect detected, but no significant biological signal"
-        elif p_val >= 0.05 and p_bio < 0.05:
-            severity = "GOOD"
-            severity_description = "Biological signal detected without significant batch effect"
-        else:
-            severity = "NONE"
-            severity_description = "Neither batch nor biological effects are statistically significant"
-
-        if verbose:
-            print(f"\nOverall Quality: {severity} - {severity_description}")
-            print(f"  (Decision criteria: batch_p={p_val:.3e}, bio_p={p_bio:.3e}, batch_eta²={batch_eta:.1%}, bio_eta²={bio_eta:.1%})")
-
-        # Median variance explained by batch
-        batch_dummies = pd.get_dummies(batch_labels).values
-        var_batch = np.array([np.corrcoef(X[:, i], batch_dummies.T)[0, 1:].max()**2
-                             for i in range(X.shape[1])])
-        median_var_batch = float(np.median(var_batch))
-
-        if verbose:
-            print(f"Median variance explained by batch across features: {median_var_batch:.1%}")
-
-        results['overall_quality'] = {
-            'severity': severity,
-            'severity_description': severity_description,
-            'median_variance_explained_by_batch': median_var_batch
-        }
-
-        return results, pc, var_batch
+      print(f"PC1-10 explain {var_explained:.1%} variance")
+      print(f"\nPVCA Variance Decomposition (across {min(10, X.shape[1])} PCs):")
+      print(f"  Batch:     {batch_var_pct:.1f}%")
+      print(f"  Biological: {bio_var_pct:.1f}%")
+      print(f"  Residual:   {residual_var_pct:.1f}%")
+    
+    # Severity classification based on PVCA
+    if batch_var_pct < 5:
+      severity = "NONE"
+      severity_description = f"Negligible batch effect (batch explains {batch_var_pct:.1f}% of variance)"
+    elif batch_var_pct < bio_var_pct:
+      if batch_var_pct < 10:
+        severity = "GOOD"
+        severity_description = f"Biological signal dominates (bio {bio_var_pct:.1f}% vs batch {batch_var_pct:.1f}%)"
+      else:
+        severity = "MILD"
+        severity_description = f"Minor batch effect present but biology dominates (bio {bio_var_pct:.1f}% vs batch {batch_var_pct:.1f}%)"
     else:
-        # No bio_groups: return batch-only results
-        batch_dummies = pd.get_dummies(batch_labels).values
-        var_batch = np.array([np.corrcoef(X[:, i], batch_dummies.T)[0, 1:].max()**2
-                             for i in range(X.shape[1])])
-        median_var_batch = float(np.median(var_batch))
-
-        if verbose:
-            print(f"Median variance explained by batch across features: {median_var_batch:.1%}")
-
-        results['median_variance_explained_by_batch'] = median_var_batch
-
-        return results, pc, var_batch
+      if batch_var_pct > 30:
+        severity = "CRITICAL"
+        severity_description = f"Severe batch effect overwhelms signal (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
+      elif batch_var_pct > 20:
+        severity = "MODERATE"
+        severity_description = f"Substantial batch effect (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
+      else:
+        severity = "WARNING"
+        severity_description = f"Batch effect exceeds biological signal (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
+    
+    if verbose:
+      print(f"\nOverall Quality: {severity} - {severity_description}")
+  
+  # PC1 analysis as secondary/confirmatory metric
+  batch_cat = pd.Categorical(batch_labels)
+  pc1_by_batch = [pc[batch_cat==b, 0] for b in batch_cat.categories]
+  if total_samples < 30 or norm_p < 0.05:
+    f_stat, p_val = kruskal(*pc1_by_batch)
+    test_used = "Kruskal-Wallis"
+  else:
+    f_stat, p_val = f_oneway(*pc1_by_batch)
+    test_used = "ANOVA"
+  ss_total = np.var(pc[:, 0]) * (len(pc[:, 0]) - 1)
+  if test_used == "ANOVA":
+    ss_between = sum([len(group) * (np.mean(group) - np.mean(pc[:, 0]))**2 for group in pc1_by_batch])
+    batch_eta = ss_between / ss_total if ss_total > 0 else 0
+  else:
+    batch_eta = (f_stat - len(batch_cat.categories) + 1) / (total_samples - len(batch_cat.categories) + 1)
+    batch_eta = max(0, min(1, batch_eta))
+  
+  if verbose:
+    print(f"\nPC1 Analysis (confirmatory):")
+    print(f"  Batch effect on PC1: F={f_stat:.2f}, p={p_val:.3e} ({test_used})")
+    print(f"  Batch effect size (η²): {batch_eta:.1%}")
+  
+  results = {
+    'pca_variance_explained': float(var_explained),
+    'batch_effect': {
+      'f_statistic': float(f_stat),
+      'p_value': float(p_val),
+      'test_used': test_used,
+      'effect_size_eta2': float(batch_eta)
+    }
+  }
+  
+  if bio_labels is not None:
+    bio_effect = _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samples, verbose)
+    results['bio_effect'] = bio_effect
+    results['pvca'] = pvca_results
+    results['overall_quality'] = {
+      'severity': severity,
+      'severity_description': severity_description,
+      'decision_basis': 'PVCA variance decomposition'
+    }
+    batch_dummies = pd.get_dummies(batch_labels).values
+    var_batch = np.array([np.corrcoef(X[:, i], batch_dummies.T)[0, 1:].max()**2 for i in range(X.shape[1])])
+    median_var_batch = float(np.median(var_batch))
+    results['overall_quality']['median_variance_explained_by_batch'] = median_var_batch
+    if verbose:
+      print(f"  Median variance explained by batch across features: {median_var_batch:.1%}")
+    return results, pc, var_batch
+  else:
+    batch_dummies = pd.get_dummies(batch_labels).values
+    var_batch = np.array([np.corrcoef(X[:, i], batch_dummies.T)[0, 1:].max()**2 for i in range(X.shape[1])])
+    median_var_batch = float(np.median(var_batch))
+    results['median_variance_explained_by_batch'] = median_var_batch
+    if verbose:
+      print(f"Median variance explained by batch across features: {median_var_batch:.1%}")
+    return results, pc, var_batch
 
 
 

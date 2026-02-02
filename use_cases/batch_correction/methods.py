@@ -17,7 +17,11 @@ def combat(data, batch, mod=None, parametric=True):
     batch = pd.Categorical(batch)
 
     # Design matrix (intercept if None)
-    M = np.ones((n, 1)) if mod is None else np.asarray(pd.get_dummies(mod), float)
+    if mod is None:
+      M = np.ones((n, 1))
+    else:
+      bio_dummies = pd.get_dummies(mod, drop_first=True).values
+      M = np.hstack([np.ones((n, 1)), bio_dummies])
 
     # ----- Standardize -----
     B_hat = np.linalg.solve(M.T @ M, M.T @ X)
@@ -129,7 +133,11 @@ def ratio_preserving_combat(data, batch, mod=None, parametric=True):
   X_safe = X_safe / X_safe.sum(axis=1, keepdims=True)
   log_ratios = np.log(X_safe)
   log_ratios = log_ratios - log_ratios.mean(axis=1, keepdims=True)
-  M = np.ones((n, 1)) if mod is None else np.asarray(pd.get_dummies(mod), float)
+  if mod is None:
+    M = np.ones((n, 1))
+  else:
+    bio_dummies = pd.get_dummies(mod, drop_first=True).values
+    M = np.hstack([np.ones((n, 1)), bio_dummies])
   B_hat = np.linalg.solve(M.T @ M, M.T @ log_ratios)
   grand_mean = M @ B_hat
   s_data = log_ratios - grand_mean
@@ -157,22 +165,24 @@ def ratio_preserving_combat(data, batch, mod=None, parametric=True):
   for i, b in enumerate(batch.categories):
     mask = batch == b
     X_adj[mask] = ((s_data[mask] - gamma_hat[i]) / np.sqrt(delta_hat[i])) * sds + grand_mean[mask]
-  X_adj = X_adj - X_adj.mean(axis=1, keepdims=True)
   X_corrected = np.exp(X_adj)
   X_corrected = np.maximum(X_corrected, 1e-10)
   X_corrected = X_corrected / X_corrected.sum(axis=1, keepdims=True)
   return X_corrected.T
 
 
-def harmony_correction(data, batch, max_iter=10, sigma=0.1):
+def harmony_correction(data, batch, max_iter=10, sigma=0.1, n_clusters=None):
   """Harmony-style iterative correction in PCA space."""
-  X = np.asarray(data).T  # samples x features
+  X = np.asarray(data).T
   batch = pd.Categorical(batch)
   n_batches = len(batch.categories)
+  if n_clusters is None:
+    n_clusters = min(50, X.shape[0]//2)
   pca = PCA(n_components=min(20, X.shape[0]-1, X.shape[1]))
   Z = pca.fit_transform(X)
+  sigma = np.std(Z)
   for iteration in range(max_iter):
-    kmeans = KMeans(n_clusters=min(50, X.shape[0]//2), random_state=42, n_init=10)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     clusters = kmeans.fit_predict(Z)
     Z_corrected = Z.copy()
     for cluster_id in np.unique(clusters):
@@ -180,23 +190,29 @@ def harmony_correction(data, batch, max_iter=10, sigma=0.1):
       if cluster_mask.sum() < 2:
         continue
       cluster_centers = []
+      batch_counts = []
       for b in batch.categories:
         batch_cluster_mask = cluster_mask & (batch == b)
         if batch_cluster_mask.sum() > 0:
           cluster_centers.append(Z[batch_cluster_mask].mean(axis=0))
+          batch_counts.append(batch_cluster_mask.sum())
       if len(cluster_centers) < 2:
         continue
-      global_center = np.mean(cluster_centers, axis=0)
+      weights = np.array(batch_counts) / sum(batch_counts)
+      global_center = np.average(cluster_centers, axis=0, weights=weights)
       for b in batch.categories:
         batch_cluster_mask = cluster_mask & (batch == b)
         if batch_cluster_mask.sum() > 0:
           batch_center = Z[batch_cluster_mask].mean(axis=0)
           correction = global_center - batch_center
-          Z_corrected[batch_cluster_mask] += sigma * correction
+          adaptive_sigma = sigma / (iteration + 1)
+          Z_corrected[batch_cluster_mask] += adaptive_sigma * correction
     Z = Z_corrected
   X_corrected = pca.inverse_transform(Z)
   X_corrected = np.maximum(X_corrected, 0)
-  X_corrected = X_corrected / X_corrected.sum(axis=1, keepdims=True)
+  row_sums = X_corrected.sum(axis=1, keepdims=True)
+  row_sums = np.where(row_sums == 0, 1, row_sums)
+  X_corrected = X_corrected / row_sums
   return X_corrected.T
 
 
@@ -206,9 +222,9 @@ def limma_style_correction(data, batch, mod=None):
   batch = pd.Categorical(batch)
   batch_dummies = pd.get_dummies(batch).values[:, 1:]  # Drop first batch as reference
   if mod is not None:
-    mod = np.asarray(pd.get_dummies(mod), float)
-    design = np.hstack([mod, batch_dummies])
-    n_bio = mod.shape[1]
+    bio_dummies = pd.get_dummies(mod, drop_first=True).values
+    design = np.hstack([np.ones((X.shape[0], 1)), bio_dummies, batch_dummies])
+    n_bio = 1 + bio_dummies.shape[1]
   else:
     design = np.hstack([np.ones((X.shape[0], 1)), batch_dummies])
     n_bio = 1
@@ -228,12 +244,15 @@ def stratified_combat(data, batch, bio_group):
   X_corrected = np.zeros_like(X)
   for bio in bio_group.categories:
     bio_mask = bio_group == bio
-    if bio_mask.sum() < 4:  # Need minimum samples
+    if bio_mask.sum() < 4:
       X_corrected[bio_mask] = X[bio_mask]
       continue
-    # Apply ComBat within this biological group only
-    group_data = X[bio_mask]
     group_batch = batch[bio_mask]
+    n_unique_batches = len(np.unique(group_batch))
+    if n_unique_batches < 2:
+      X_corrected[bio_mask] = X[bio_mask]
+      continue
+    group_data = X[bio_mask]
     corrected = combat(group_data.T, group_batch).T
     X_corrected[bio_mask] = corrected
   X_corrected = np.maximum(X_corrected, 1e-10)

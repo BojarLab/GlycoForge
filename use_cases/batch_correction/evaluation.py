@@ -10,36 +10,33 @@ from scipy.spatial.distance import squareform, pdist
 from sklearn.cluster import KMeans
 from glycowork.motif.analysis import get_differential_expression
 from glycoforge.sim_bio_factor import create_bio_groups
+from glycoforge.utils import pvca_variance_decomposition
 import contextlib
 import io
 import warnings
 
 
-def pca_batch_effect(data, batch):
-    """
-    Calculate batch effect strength using PCA.
-    Measures how well batches are separated in the first principal component.
-    
-    Returns:
-    - Batch separation score: higher values indicate stronger batch effects
-    - Ideal value after correction: close to 0
-    """
-    pca = PCA(n_components=2)
-    pca_result = pca.fit_transform(data)
-    
-    # Calculate batch centers in PC1 space
+def pca_batch_effect(data, batch, n_components=3):
+  """Calculate batch effect strength using PCA.
+  Measures how well batches are separated in the variance-explained-weighted principal components.
+  Returns:
+  - Batch separation score: higher values indicate stronger batch effects
+  - Ideal value after correction: close to 0
+  """
+  pca = PCA(n_components=min(n_components, data.shape[0]-1, data.shape[1]))
+  pca_result = pca.fit_transform(data)
+  batch_separations = []
+  for pc_idx in range(pca_result.shape[1]):
     batch_centers = []
     for batch_id in np.unique(batch):
-        mask = batch == batch_id
-        if np.sum(mask) > 0:  # Ensure batch has samples
-            center = np.mean(pca_result[mask, 0])  # PC1 center for this batch
-            batch_centers.append(center)
-    
-    # Batch separation = standard deviation of batch centers
-    # Higher values = stronger batch effects
-    batch_separation = np.std(batch_centers) if len(batch_centers) > 1 else 0.0
-    
-    return batch_separation
+      mask = batch == batch_id
+      if np.sum(mask) > 0:
+        center = np.mean(pca_result[mask, pc_idx])
+        batch_centers.append(center)
+    if len(batch_centers) > 1:
+      separation = np.std(batch_centers) * pca.explained_variance_ratio_[pc_idx]
+      batch_separations.append(separation)
+  return np.sum(batch_separations) if batch_separations else 0.0
 
 
 def silhouette(data, batch):
@@ -47,68 +44,73 @@ def silhouette(data, batch):
 
 
 def kBET(data, batch, k=25):
-    """
-    k-nearest neighbor Batch Effect Test (kBET).
-    
-    Parameters:
-    - data: Input data matrix
-    - batch: Batch labels
-    - k: Number of nearest neighbors to consider
-    
-    Returns:
-    - Mean chi-square statistic (higher values indicate stronger batch effects)
-    """
-    k = min(k, len(data) - 1)
-    
-    nn = NearestNeighbors(n_neighbors=k, metric='euclidean')
-    nn.fit(data)
-    distances, indices = nn.kneighbors(data)
-    
-    n_batches = len(np.unique(batch))
-    batch_frequencies = np.zeros((len(batch), n_batches))
-    
-    for i, idx in enumerate(indices):
-        batch_frequencies[i] = np.bincount(batch[idx], minlength=n_batches)
-
-    expected_freq = np.mean(batch_frequencies, axis=0)
-    expected_freq = np.where(expected_freq == 0, 1e-6, expected_freq)  # Avoid division by zero
-    
-    chi_square_stats = np.sum((batch_frequencies - expected_freq)**2 / expected_freq, axis=1)
-    
-    return np.mean(chi_square_stats)
+  """k-nearest neighbor Batch Effect Test (kBET).
+  Parameters:
+  - data: Input data matrix
+  - batch: Batch labels
+  - k: Number of nearest neighbors to consider
+  Returns:
+  - Mean chi-square statistic (higher values indicate stronger batch effects)
+  """
+  k = min(k, len(data) - 1)
+  nn = NearestNeighbors(n_neighbors=k, metric='euclidean')
+  nn.fit(data)
+  distances, indices = nn.kneighbors(data)
+  batch_array = np.asarray(batch)
+  unique_batches = np.unique(batch_array)
+  n_batches = len(unique_batches)
+  batch_counts = np.array([np.sum(batch_array == b) for b in unique_batches])
+  total_samples = len(batch_array)
+  expected_proportions = batch_counts / total_samples
+  chi_square_stats = []
+  for i, idx in enumerate(indices):
+    neighbor_batches = batch_array[idx]
+    observed = np.array([np.sum(neighbor_batches == b) for b in unique_batches])
+    expected = expected_proportions * k
+    expected = np.where(expected < 0.5, 0.5, expected)
+    chi_sq = np.sum((observed - expected)**2 / expected)
+    chi_square_stats.append(chi_sq)
+  return np.mean(chi_square_stats)
 
 
 def lisi(data, batch, perplexity=30):
-    """
-    Local Inverse Simpson's Index (LISI).
-    
-    Parameters:
-    - data: Input data matrix
-    - batch: Batch labels
-    - perplexity: Perplexity parameter for distance calculations
-    
-    Returns:
-    - Mean LISI score (higher values indicate better batch mixing)
-    """
-
-    perplexity = min(perplexity, len(data) - 1)
-    
-    distances = squareform(pdist(data))
-    
-    # Avoid division by zero
-    distances = np.where(distances == 0, 1e-10, distances)
-    
-    P = np.exp(-distances / perplexity)
-
-    # Normalize probabilities (exclude self)
-    np.fill_diagonal(P, 0)
-    P = P / np.sum(P, axis=1, keepdims=True)
-    
-    # One-hot encode batch labels
-    batch_onehot = pd.get_dummies(batch).values
-    lisi_scores = 1 / np.sum(np.dot(P, batch_onehot)**2, axis=1)
-    
-    return np.mean(lisi_scores)
+  """Local Inverse Simpson's Index (LISI).
+  Parameters:
+  - data: Input data matrix
+  - batch: Batch labels
+  - perplexity: Perplexity parameter for distance calculations
+  Returns:
+  - Mean LISI score (higher values indicate better batch mixing)
+  """
+  perplexity = min(perplexity, len(data) - 1)
+  distances = squareform(pdist(data, metric='euclidean'))
+  np.fill_diagonal(distances, np.inf)
+  P = np.zeros_like(distances)
+  for i in range(len(data)):
+    Di = distances[i]
+    beta = 1.0
+    min_beta, max_beta = -np.inf, np.inf
+    for iteration in range(50):
+      Pi = np.exp(-Di * beta)
+      sum_Pi = np.sum(Pi)
+      if sum_Pi == 0:
+        Pi = np.ones_like(Pi) / len(Pi)
+        break
+      Pi = Pi / sum_Pi
+      H = -np.sum(Pi * np.log2(Pi + 1e-12))
+      Hdiff = H - np.log2(perplexity)
+      if abs(Hdiff) < 1e-5:
+        break
+      if Hdiff > 0:
+        min_beta = beta
+        beta = (beta + max_beta) / 2 if max_beta != np.inf else beta * 2
+      else:
+        max_beta = beta
+        beta = (beta + min_beta) / 2 if min_beta != -np.inf else beta / 2
+    P[i] = Pi
+  batch_onehot = pd.get_dummies(batch).values
+  lisi_scores = 1 / np.sum(np.dot(P, batch_onehot)**2, axis=1)
+  return np.mean(lisi_scores)
 
 
 def adjusted_rand_index(data, batch):
@@ -486,6 +488,19 @@ def quantify_batch_effect_impact(Y_with_batch_clr, #DataFrame (glycans x samples
                                   ): 
     # Transpose to (samples x features) format required by metrics
     data_T = Y_with_batch_clr.T.values
+    # Convert bio_groups dict to bio_labels array for PVCA
+    if bio_groups is not None:
+      if isinstance(bio_groups, dict):
+        bio_labels = np.zeros(len(Y_with_batch_clr.columns), dtype=int)
+        for group_id, (group_name, cols) in enumerate(bio_groups.items()):
+          for col in cols:
+            if col in Y_with_batch_clr.columns:
+              col_idx = Y_with_batch_clr.columns.get_loc(col)
+              bio_labels[col_idx] = group_id
+      else:
+        bio_labels = bio_groups
+    else:
+      bio_labels = None
     
     # Store results
     metrics = {}
@@ -500,6 +515,18 @@ def quantify_batch_effect_impact(Y_with_batch_clr, #DataFrame (glycans x samples
         if bio_groups:
             print(f"Biological groups: {[f'{k}({len(v)})' for k, v in bio_groups.items()]}")
         print("-" * 60)
+
+    # PVCA as primary comprehensive metric
+    if bio_labels is not None:
+      pvca_results = pvca_variance_decomposition(Y_with_batch_clr, batch_labels, bio_labels, n_components=10)
+      metrics['pvca_batch_variance'] = pvca_results['batch_variance_pct']
+      metrics['pvca_bio_variance'] = pvca_results['bio_variance_pct']
+      metrics['pvca_residual_variance'] = pvca_results['residual_variance_pct']
+      if verbose:
+        print("0. PVCA Variance Decomposition (across 10 PCs)")
+        print(f"   Batch variance:     {pvca_results['batch_variance_pct']:.2f}%")
+        print(f"   Biological variance: {pvca_results['bio_variance_pct']:.2f}%")
+        print(f"   Residual variance:   {pvca_results['residual_variance_pct']:.2f}%")
     
     # 1. Silhouette Score (batch separation)
     silhouette_score = silhouette(data_T, batch_labels)
@@ -547,8 +574,6 @@ def quantify_batch_effect_impact(Y_with_batch_clr, #DataFrame (glycans x samples
         print("=" * 60)
     
     return metrics
-
-
 
 
 def evaluate_biological_preservation(clean_data, with_batch_data, corrected_data, bio_labels):

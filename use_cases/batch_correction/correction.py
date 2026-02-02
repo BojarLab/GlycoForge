@@ -128,7 +128,7 @@ def process_corrections(config):
                 random_seed=seed
             )
             
-            Y_corrected_clr_values = combat(Y_with_batch_clr_fixed.values, batch_labels)
+            Y_corrected_clr_values = combat(Y_with_batch_clr_fixed.values, batch_labels, mod=bio_labels)
             Y_corrected_clr = pd.DataFrame(
                 Y_corrected_clr_values, 
                 index=Y_with_batch_clr_fixed.index, 
