@@ -35,6 +35,9 @@ def simulate(
     u_dict=None,
     missing_fraction=0.0,
     mnar_bias=2.0,
+    glycan_sequences=None,
+    motif_rules=None,
+    motif_bias=0.8,
     random_seeds=[42],
     output_dir="results/",
     verbose=False,
@@ -69,7 +72,8 @@ def simulate(
         'winsorize_percentile': winsorize_percentile,
         'baseline_method': baseline_method,
         'missing_fraction': missing_fraction,
-        'mnar_bias': mnar_bias
+        'mnar_bias': mnar_bias,
+        'motif_bias': motif_bias
     }
 
     # Identify which parameters are lists/tuples (requiring grid search)
@@ -187,6 +191,10 @@ def simulate(
         alpha_H = np.ones(n_glycans) * 10
         real_effect_sizes = None
         alpha_U_base = None  # Will generate synthetically in loop
+        if motif_rules is not None and glycan_sequences is None:
+            glycan_sequences = [f"glycan_{i + 1}" for i in range(n_glycans)]
+            if verbose:
+                print("[Simulated] Warning: motif_rules provided but no glycan_sequences, using placeholders")
 
     elif data_source == "real":
         df = load_data_from_glycowork(data_file)
@@ -401,21 +409,33 @@ def simulate(
                 print(f"[Real Data] Using alpha_U from real effect sizes")
         else:
             # Generate alpha_U synthetically
-            alpha_U, delta = generate_alpha_U(alpha_H, up_frac=0.3, down_frac=0.35, seed=seed)
+            alpha_U, delta = generate_alpha_U(alpha_H,
+                                              up_frac=0.3,
+                                              down_frac=0.35,
+                                              glycan_sequences=glycan_sequences,
+                                              motif_rules=motif_rules,
+                                              motif_bias=motif_bias,
+                                              seed=seed,
+                                              verbose=verbose)
 
         if verbose:
             print(f"alpha_U range: [{alpha_U.min():.2f}, {alpha_U.max():.2f}]")
 
         # Step 3: Generate clean data
         P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed=seed, verbose=verbose)
-        glycan_index = np.arange(1, P.shape[1] + 1)
+        if glycan_sequences is not None:
+            glycan_index = glycan_sequences[:n_glycans]
+            index_name = "glycan"
+        else:
+            glycan_index = np.arange(1, P.shape[1] + 1)
+            index_name = "glycan_index"
         Y_clean = pd.DataFrame(
             P.T,
             index=glycan_index,
-            columns=[f"healthy_{i+1}" for i in range(np.sum(labels==0))] +
-                    [f"unhealthy_{i+1}" for i in range(np.sum(labels==1))]
+            columns=[f"healthy_{i + 1}" for i in range(np.sum(labels == 0))] +
+                    [f"unhealthy_{i + 1}" for i in range(np.sum(labels == 1))]
         )
-        Y_clean.index.name = "glycan_index"
+        Y_clean.index.name = index_name
 
         Y_clean_clr = clr(Y_clean.values.T).T
         Y_clean_clr = pd.DataFrame(Y_clean_clr, index=Y_clean.index, columns=Y_clean.columns)

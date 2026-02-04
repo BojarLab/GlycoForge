@@ -1,6 +1,7 @@
 import numpy as np
 from .utils import clr, invclr
 from scipy.stats import dirichlet
+from glycowork.motif.graph import subgraph_isomorphism
 
 
 def create_bio_groups(data, prefix_mapping):
@@ -35,28 +36,62 @@ def generate_alpha_U(alpha_H,
                       down_frac=0.3,
                      up_scale_range=(1.1, 3.0),
                      down_scale_range=(0.3, 0.9),
-                     seed=None):
-    """Generate alpha_U with heterogeneous up/down scaling."""
+                     glycan_sequences=None,
+                     motif_rules=None,
+                     motif_bias=0.8,
+                     seed=None,
+                     verbose=False):
+    """Generate alpha_U with heterogeneous up/down scaling.
+    Parameters:
+    -----------
+    glycan_sequences : list of str, optional
+        IUPAC glycan sequences. If None with motif_rules, uses uniform probabilities.
+    motif_rules : dict, optional
+        Motif-to-direction mapping, e.g. {"Fuc": "up", "Neu5Ac": "down"}
+    motif_bias : float (0-1)
+        Strength of motif preference. 1.0 = strict enforcement, 0.0 = uniform random
+    """
     rng = np.random.default_rng(seed)
     n = len(alpha_H)
     alpha_U = alpha_H.copy()
     delta = np.ones(n)
-    
     n_up = int(up_frac * n)
     n_down = int(down_frac * n)
-    
-    up_idx = rng.choice(n, n_up, replace=False)
-    down_candidates = np.setdiff1d(np.arange(n), up_idx)
-    down_idx = rng.choice(down_candidates, n_down, replace=False)
-    
+    if motif_rules is not None and glycan_sequences is not None:
+        motif_scores = np.zeros((n, 2))
+        for idx, seq in enumerate(glycan_sequences):
+            for motif, direction in motif_rules.items():
+                if subgraph_isomorphism(seq, motif):
+                    if direction.lower() in ["up", "upregulate", "increase"]:
+                        motif_scores[idx, 0] += 1.0
+                    elif direction.lower() in ["down", "downregulate", "decrease"]:
+                        motif_scores[idx, 1] += 1.0
+        up_probs = 1.0 + motif_bias * motif_scores[:, 0]
+        down_probs = 1.0 + motif_bias * motif_scores[:, 1]
+        up_probs /= np.sum(up_probs)
+        down_probs /= np.sum(down_probs)
+        up_idx = rng.choice(n, n_up, replace=False, p=up_probs)
+        down_candidates = np.setdiff1d(np.arange(n), up_idx)
+        down_probs_adj = down_probs[down_candidates] / np.sum(down_probs[down_candidates])
+        down_idx = rng.choice(down_candidates, n_down, replace=False, p=down_probs_adj)
+        if verbose:
+            print(f"[Motif-based generation] Rules: {motif_rules}")
+            print(f"  Selected: {n_up} up, {n_down} down")
+            for motif, direction in motif_rules.items():
+                matching = [i for i in range(n) if motif in glycan_sequences[i]]
+                target_set = up_idx if direction.lower() in ["up", "upregulate", "increase"] else down_idx
+                selected = len(set(matching) & set(target_set))
+                print(f"  '{motif}' ({direction}): {len(matching)} matches, {selected} selected")
+    else:
+        up_idx = rng.choice(n, n_up, replace=False)
+        down_candidates = np.setdiff1d(np.arange(n), up_idx)
+        down_idx = rng.choice(down_candidates, n_down, replace=False)
     up_scales = rng.uniform(*up_scale_range, size=n_up)
     down_scales = rng.uniform(*down_scale_range, size=n_down)
- 
     alpha_U[up_idx] *= up_scales
     alpha_U[down_idx] *= down_scales
     delta[up_idx] = up_scales
     delta[down_idx] = down_scales
-    
     alpha_U = np.clip(alpha_U, 1e-3, None)
     return alpha_U, delta
 
