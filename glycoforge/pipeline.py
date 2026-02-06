@@ -58,10 +58,8 @@ def simulate(
         affected_fraction = parsed.get('affected_fraction', affected_fraction)
         positive_prob = parsed.get('positive_prob', positive_prob)
         overlap_prob = parsed.get('overlap_prob', overlap_prob)
-
     # Capture original config for metadata
     differential_mask_config = differential_mask
-
     # Define parameters supported for grid search
     grid_search_params = {
         'kappa_mu': kappa_mu,
@@ -75,41 +73,31 @@ def simulate(
         'mnar_bias': mnar_bias,
         'motif_bias': motif_bias
     }
-
     # Identify which parameters are lists/tuples (requiring grid search)
     list_params = {k: v for k, v in grid_search_params.items() if isinstance(v, (list, tuple))}
-
     if list_params:
         import itertools
-
         # Extract keys and values for product
         keys = list(list_params.keys())
         values = list(list_params.values())
-
         # Generate all combinations
         combinations = list(itertools.product(*values))
-
         all_grid_results = {}
-
         if verbose:
             print("=" * 60)
             print(f"STARTING GRID SEARCH: {len(combinations)} combinations")
             print(f"Varying parameters: {', '.join(keys)}")
             print("=" * 60)
-
         for combo in combinations:
             # Create a dictionary for this specific combination
             current_params = dict(zip(keys, combo))
-
             # Construct subdirectory name dynamically
             # e.g., "bio_1.5_kdir_100_kappa_2.0"
             dir_name_parts = [f"{k}_{v}" for k, v in current_params.items()]
             sub_dir = os.path.join(output_dir, "_".join(dir_name_parts))
-
             if verbose:
                 param_str = ", ".join([f"{k}={v}" for k, v in current_params.items()])
                 print(f"\n>>> Grid Run: {param_str}")
-
             # Prepare arguments for recursive call
             # Start with all original arguments
             kwargs = {
@@ -142,31 +130,21 @@ def simulate(
                 'save_csv': save_csv,
                 'show_pca_plots': show_pca_plots
             }
-
             # Update with current grid values
             kwargs.update(current_params)
-
             # Recursive call
             result = simulate(**kwargs)
-
             # Store result with a key representing the combination
             key_name = "_".join(dir_name_parts)
             all_grid_results[key_name] = result
-
         return all_grid_results
-
-
     if data_source not in ["simulated", "real"]:
         raise ValueError(f"data_source must be 'simulated' or 'real', got '{data_source}'")
-
     if data_source == "real" and data_file is None:
         raise ValueError("data_file is required when data_source='real'")
-
     if show_pca_plots is None:
         show_pca_plots = verbose
-
     os.makedirs(output_dir, exist_ok=True)
-
     if verbose:
         print("=" * 60)
         print("UNIFIED BATCH CORRECTION PIPELINE")
@@ -183,50 +161,42 @@ def simulate(
         print(f"Missingness: fraction={missing_fraction:.1%}, bias={mnar_bias}")
         print(f"Output: {output_dir}")
         print("=" * 60)
-
     # Step 1: Prepare alpha_H based on data source
     bio_debug_info = None  # Initialize debug info storage
-
     if data_source == "simulated":
-        alpha_H = np.ones(n_glycans) * 10
+        rng_alpha = np.random.default_rng(42)  # Fixed seed for reproducible baseline structure
+        raw_alpha = rng_alpha.lognormal(mean=0, sigma=1.0, size=n_glycans)
+        alpha_H = raw_alpha / np.mean(raw_alpha) * 10  # Normalize to maintain mean concentration of 10
         real_effect_sizes = None
         alpha_U_base = None  # Will generate synthetically in loop
         if motif_rules is not None and glycan_sequences is None:
             glycan_sequences = [f"glycan_{i + 1}" for i in range(n_glycans)]
             if verbose:
                 print("[Simulated] Warning: motif_rules provided but no glycan_sequences, using placeholders")
-
     elif data_source == "real":
         df = load_data_from_glycowork(data_file)
-
         # Get column prefixes (with defaults)
         if column_prefix is None:
             column_prefix = {}
         healthy_prefix = column_prefix.get('healthy', 'R7')
         unhealthy_prefix = column_prefix.get('unhealthy', 'BM')
-
         # Find columns by prefix
         r7_cols = [c for c in df.columns if c.startswith(healthy_prefix)]
         bm_cols = [c for c in df.columns if c.startswith(unhealthy_prefix)]
-
         if not r7_cols or not bm_cols:
             raise ValueError(
                 f"No columns found with prefixes: healthy='{healthy_prefix}', unhealthy='{unhealthy_prefix}'. "
                 f"Available columns: {df.columns.tolist()[:10]}... "
                 f"Please check 'column_prefix' in config."
             )
-
         # Get actual number of glycans from real data
         n_glycans_real = df.shape[0]
-
         # Preprocess data to avoid zero-variance issues in glycowork
         # Add tiny random noise to zero values to prevent constant imputation
         rng = np.random.default_rng(42)
         numeric_cols = r7_cols + bm_cols
-
         # Create a copy to avoid modifying original dataframe if needed elsewhere
         df_processed = df.copy()
-
         # Apply jitter only to zero values
         for col in numeric_cols:
             zero_mask = df_processed[col] == 0
@@ -244,7 +214,6 @@ def simulate(
             print(f"    → {r7_cols[:min(3, len(r7_cols))]}...")
             print(f"  - transform='CLR', impute=True")
             print(f"    [WARNING] Effect size convention: positive = upregulated in disease")
-
         # Convention: group1 = disease/unhealthy (BM), group2 = control/healthy (R7)
         # This ensures positive effect sizes indicate upregulation in disease
         # Suppress glycowork output when verbose=False and capture messages
@@ -282,38 +251,31 @@ def simulate(
             if verbose:
                 print(f"[Real Data] Warning: get_differential_expression returned {len(results)} rows, expected {n_glycans_real}")
                 print(f"[Real Data] Aligning effect sizes using index mapping, filling missing with 0.0")
-
             # Initialize with zeros for all glycans
             aligned_effect_sizes = np.zeros(n_glycans_real)
             aligned_significant = np.zeros(n_glycans_real, dtype=bool)  # Also align significant mask
-
             # Map results back to original positions using DataFrame index
             for idx, (effect_size, significant) in enumerate(zip(results['Effect size'], results.get('significant', [False] * len(results)))):
                 original_idx = results.index[idx]
                 if original_idx < n_glycans_real:
                     aligned_effect_sizes[original_idx] = effect_size if not pd.isna(effect_size) else 0.0
                     aligned_significant[original_idx] = significant if not pd.isna(significant) else False
-
             real_effect_sizes = aligned_effect_sizes.tolist()
             significant_mask = aligned_significant
         else:
             # Normal case: lengths match, just handle NaN
             real_effect_sizes = results['Effect size'].fillna(0.0).tolist()
             significant_mask = results['significant'].values if 'significant' in results.columns else None
-
         if use_real_effect_sizes:
             # Extract healthy baseline from mean of all healthy samples
             healthy_ref = df[r7_cols].mean(axis=1).values
-
             # Handle zeros in healthy reference
             healthy_ref = np.array(healthy_ref, dtype=float)
             if np.any(healthy_ref == 0):
                 if verbose:
                     print(f"[Real Data] Found {(healthy_ref == 0).sum()} zeros in healthy mean")
-
             # Normalize to proportions
             p_h = healthy_ref / np.sum(healthy_ref)
-
             # Resolve differential_mask using helper
             # Use aligned significant_mask that matches n_glycans_real
             differential_mask = define_differential_mask(
@@ -323,11 +285,9 @@ def simulate(
                 significant_mask=significant_mask,  # Already aligned above
                 verbose=verbose
             )
-
             if verbose:
                 n_differential = int(differential_mask.sum())
                 print(f"[Real Data] {n_differential}/{len(differential_mask)} glycans will have effects injected")
-
             # Call new function with real effect sizes via CLR-space injection
             alpha_H, alpha_U_base, bio_debug_info = define_dirichlet_params_from_real_data(
                 p_h=p_h,
@@ -342,10 +302,8 @@ def simulate(
                 max_alpha=None,
                 verbose=verbose
             )
-
             # Override n_glycans with actual data size
             n_glycans = n_glycans_real
-
             if verbose:
                 print(f"[Real Data] Used CLR-space injection for effect sizes")
                 print(f"[Real Data] Actual n_glycans from data: {n_glycans}")
@@ -356,7 +314,6 @@ def simulate(
             n_glycans = n_glycans_real
             alpha_H = np.ones(n_glycans) * 10
             alpha_U_base = None  # Will generate synthetically in loop
-
         # Quick check: Original real data bio effect (only in hybrid mode)
         original_data_bio_check = None
         if use_real_effect_sizes:
@@ -368,16 +325,13 @@ def simulate(
                 real_data_clr_df, bio_labels_real,
                 stage_name="Original Real Data", verbose=verbose
             )
-
         if verbose:
             print(f"Loaded real data: {len(r7_cols)} healthy, {len(bm_cols)} unhealthy")
             print(f"Number of glycans: {n_glycans}")
             print(f"Effect sizes range: [{min(real_effect_sizes):.3f}, {max(real_effect_sizes):.3f}]")
-
     # Step 2: Define batch direction vectors
     # Default: use the provided batch_effect_direction as raw value
     batch_effect_direction_raw = batch_effect_direction
-
     if u_dict is None:
         # Generate u_dict and get the actual raw direction (be generated in auto mode)
         u_dict, batch_effect_direction_raw = define_batch_direction(
@@ -389,18 +343,13 @@ def simulate(
             overlap_prob=overlap_prob,
             verbose=verbose
         )
-
-
     if verbose:
         print(f"Batch direction vectors: {[len(v) for v in u_dict.values()]}")
-
     # Step 3-9: Multi-run loop
     all_runs_results = []
-
     for run_idx, seed in enumerate(random_seeds):
         if verbose:
             print(f"\n--- Run {run_idx + 1}/{len(random_seeds)} (seed={seed}) ---")
-
         # Generate alpha_U per-run
         if use_real_effect_sizes:
             # Use alpha_U from define_dirichlet_params (based on real effect sizes)
@@ -417,10 +366,8 @@ def simulate(
                                               motif_bias=motif_bias,
                                               seed=seed,
                                               verbose=verbose)
-
         if verbose:
             print(f"alpha_U range: [{alpha_U.min():.2f}, {alpha_U.max():.2f}]")
-
         # Step 3: Generate clean data
         P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed=seed, verbose=verbose)
         if glycan_sequences is not None:
@@ -436,21 +383,17 @@ def simulate(
                     [f"unhealthy_{i + 1}" for i in range(np.sum(labels == 1))]
         )
         Y_clean.index.name = index_name
-
         Y_clean_clr = clr(Y_clean.values.T).T
         Y_clean_clr = pd.DataFrame(Y_clean_clr, index=Y_clean.index, columns=Y_clean.columns)
-
         if save_csv:
             Y_clean.to_csv(f"{output_dir}/1_Y_clean_seed{seed}.csv", float_format="%.32f")
             Y_clean_clr.to_csv(f"{output_dir}/1_Y_clean_clr_seed{seed}.csv", float_format="%.32f")
-
         # Quick check: Simulated clean data bio effect (all modes)
         bio_labels_sim = [0] * n_H + [1] * n_U
         Y_clean_bio_check, _ = check_bio_effect(
             Y_clean_clr, bio_labels_sim,
             stage_name="Simulated Clean Data (Y_clean)", verbose=verbose
         )
-
         # Show injection success summary (only in hybrid mode with verbose)
         if use_real_effect_sizes and verbose:
             print("\n" + "=" * 60)
@@ -467,7 +410,6 @@ def simulate(
                     print(f"  Original data eta²: {orig_eta:.1%} → Simulated data eta²: {sim_eta:.1%}")
                     print(f"  Enhancement: {sim_eta/orig_eta:.2f}× stronger" if orig_eta > 0 else "")
             print("=" * 60 + "\n")
-
         # Step 4: Apply batch effects
         batch_groups, batch_labels = stratified_batches_from_columns(
             Y_clean_clr.columns,
@@ -475,10 +417,8 @@ def simulate(
             seed=seed,
             verbose=verbose
         )
-
         Y_clean_T = Y_clean_clr.T.values
         sigma = estimate_sigma(Y_clean_clr)
-
         Y_with_batch_clr_T, Y_with_batch_T = apply_batch_effect(
             Y_clean=Y_clean_T,
             batch_labels=batch_labels,
@@ -488,14 +428,11 @@ def simulate(
             var_b=var_b,
             seed=seed
         )
-
         Y_with_batch_clr = pd.DataFrame(Y_with_batch_clr_T.T, index=Y_clean_clr.index, columns=Y_clean_clr.columns)
         Y_with_batch = pd.DataFrame(Y_with_batch_T.T, index=Y_clean_clr.index, columns=Y_clean_clr.columns)
-
         if save_csv:
             Y_with_batch.to_csv(f"{output_dir}/2_Y_with_batch_seed{seed}.csv", float_format="%.32f")
             Y_with_batch_clr.to_csv(f"{output_dir}/2_Y_with_batch_clr_seed{seed}.csv", float_format="%.32f")
-
         # Step 4.5: Apply MNAR missingness
         Y_missing, Y_missing_clr, missing_mask, missing_diagnostics = apply_mnar_missingness(
             Y_with_batch,
@@ -507,10 +444,8 @@ def simulate(
         if missing_fraction > 0 and save_csv:
             Y_missing.to_csv(f"{output_dir}/3_Y_with_batch_and_missing_seed{seed}.csv", float_format="%.32f")
             Y_missing_clr.to_csv(f"{output_dir}/3_Y_with_batch_and_missing_clr_seed{seed}.csv", float_format="%.32f")
-        
         # Use Y_missing_clr for subsequent analysis if missingness applied
         Y_for_analysis = Y_missing_clr if missing_fraction > 0 else Y_with_batch_clr
-
         # Step 5: Quick batch effect check
         bio_groups, bio_labels = create_bio_groups(
             Y_clean_clr,
@@ -523,7 +458,6 @@ def simulate(
         check_batch_effect_results, _, _ = check_batch_effect(Y_for_analysis, batch_labels, bio_labels, verbose=verbose)
         if verbose:
             print("=" * 60 + "\n")
-
         # Step 6: PCA plots
         if show_pca_plots:
             plot_pca(Y_clean_clr, bio_groups=bio_groups,
@@ -533,11 +467,9 @@ def simulate(
             if missing_fraction > 0:
                 plot_pca(Y_missing_clr, bio_groups=bio_groups, batch_groups=batch_groups,
                         title=f"Run {run_idx + 1}: With Batch + Missingness")
-
         # Step 7: Save metadata JSON
         batch_groups_serializable = {k: list(v) for k, v in batch_groups.items()}
         bio_groups_serializable = {k: list(v) for k, v in bio_groups.items()}
-
         # Construct bio_parameters
         bio_parameters = {
             'n_H': n_H,
@@ -549,10 +481,8 @@ def simulate(
             'variance_ratio': variance_ratio,
             'differential_mask_config': differential_mask_config if isinstance(differential_mask_config, (str, type(None))) else "Custom Array"
         }
-
         if data_source == "real":
             bio_parameters['differential_mask_sum'] = int(differential_mask.sum()) if differential_mask is not None else 0
-
         # Construct batch_parameters
         batch_parameters = {
             'n_batches': n_batches,
@@ -566,32 +496,25 @@ def simulate(
             'sigma_mean': float(np.mean(sigma)),
             'sigma_std': float(np.std(sigma))
         }
-
         # Construct quality_checks (in data processing order)
         quality_checks = {}
-
         # Step 1: Original data check (only for hybrid mode)
         if use_real_effect_sizes and original_data_bio_check is not None:
             quality_checks['original_data'] = original_data_bio_check
-
         # Step 2: Y_clean check (all modes)
         if Y_clean_bio_check is not None:
             quality_checks['Y_clean'] = Y_clean_bio_check
-
         # Step 3: Y_with_batch check (all modes)
         quality_checks['Y_with_batch'] = check_batch_effect_results
-
         # Step 4: Missingness diagnostics (if applied)
         if missing_fraction > 0:
             quality_checks['missingness'] = missing_diagnostics
-
         # Construct dirichlet_parameters
         dirichlet_parameters = {
             'alpha_H': alpha_H.tolist(),
             'alpha_U': alpha_U.tolist(),
             'differential_mask': differential_mask.tolist() if differential_mask is not None and hasattr(differential_mask, 'tolist') else None
         }
-
         # Construct sample_info
         sample_info = {
             'bio_labels': bio_labels.tolist(),
@@ -599,17 +522,14 @@ def simulate(
             'bio_groups': bio_groups_serializable,
             'batch_groups': batch_groups_serializable
         }
-
         # Construct metadata with new structure
         metadata = {
             'seed': seed,
             'data_source': data_source,
         }
-
         if data_source == "real":
             metadata['data_file'] = data_file
             metadata['use_real_effect_sizes'] = use_real_effect_sizes
-
         metadata.update({
             'n_glycans': n_glycans,
             'n_samples': n_H + n_U,
@@ -619,18 +539,15 @@ def simulate(
             'dirichlet_parameters': dirichlet_parameters,
             'sample_info': sample_info
         })
-
         # Add data processing information for transparency and debugging
         if data_source == "real":
             # Get prefix info (handle both dict and None cases)
             prefix_config = column_prefix if column_prefix is not None else {}
             healthy_prefix_used = prefix_config.get('healthy', 'R7')
             unhealthy_prefix_used = prefix_config.get('unhealthy', 'BM')
-
             # Add captured glycowork messages first (if any)
             if glycowork_messages:
                 metadata['glycowork_messages'] = glycowork_messages
-
             metadata['differential_expression_config'] = {
                 'jitter_applied': True,
                 'jitter_range': [1e-6, 1.1e-6],
@@ -644,18 +561,15 @@ def simulate(
                     'convention': 'positive effect size = upregulated in disease (group1 > group2)'
                 } if use_real_effect_sizes else None
             }
-
         # Add debug info (optional, only in hybrid mode)
         if bio_debug_info is not None:
             metadata['bio_injection_debug'] = bio_debug_info
-
         # Record batch_effect_direction configuration
         batch_direction_config = {
             'mode': None,
             'manual': None,
             'auto': None
         }
-
         if batch_effect_direction is not None:
             # Manual mode: batch_effect_direction was provided
             batch_direction_config['mode'] = 'manual'
@@ -671,9 +585,7 @@ def simulate(
                 'positive_prob': positive_prob,
                 'overlap_prob': overlap_prob
             }
-
         metadata['batch_parameters']['batch_effect_direction'] = batch_direction_config
-
         # Prepare batch_effect_direction_raw for serialization
         batch_effect_direction_raw_serializable = None
         if batch_effect_direction_raw is not None:
@@ -682,22 +594,17 @@ def simulate(
                                 for glycan_idx, direction in effects.items()}
                 for batch_id, effects in batch_effect_direction_raw.items()
             }
-
         metadata['batch_injection_debug'] = {
             'batch_effect_direction_raw': batch_effect_direction_raw_serializable,
             'u_dict': {k: v.tolist() for k, v in u_dict.items()},
             'affected_glycans_per_batch': {k: len(v) for k, v in u_dict.items()}
         }
-
         metadata_path = f"{output_dir}/metadata_seed{seed}.json"
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False, separators=(',', ': '))
-
         if verbose:
             print(f"Metadata saved: {metadata_path}")
-
         all_runs_results.append(metadata)
-
     if verbose:
         print("=" * 60)
         print("PIPELINE COMPLETED")
@@ -705,7 +612,6 @@ def simulate(
         print(f"Processed {len(random_seeds)} seeds successfully")
         print(f"Results in: {output_dir}")
         print("=" * 60)
-
     return {
         'metadata': all_runs_results,
         'config': {
