@@ -38,6 +38,8 @@ def simulate(
     glycan_sequences=None,
     motif_rules=None,
     motif_bias=0.8,
+    batch_motif_rules=None, # {batch_id: {motif: direction}}
+    batch_motif_bias=0.8,
     random_seeds=[42],
     output_dir="results/",
     verbose=False,
@@ -71,7 +73,8 @@ def simulate(
         'baseline_method': baseline_method,
         'missing_fraction': missing_fraction,
         'mnar_bias': mnar_bias,
-        'motif_bias': motif_bias
+        'motif_bias': motif_bias,
+        'batch_motif_bias': batch_motif_bias
     }
     # Identify which parameters are lists/tuples (requiring grid search)
     list_params = {k: v for k, v in grid_search_params.items() if isinstance(v, (list, tuple))}
@@ -341,7 +344,10 @@ def simulate(
             affected_fraction=affected_fraction,
             positive_prob=positive_prob,
             overlap_prob=overlap_prob,
-            verbose=verbose
+            verbose=verbose,
+            glycan_sequences=glycan_sequences,
+            batch_motif_rules=batch_motif_rules,
+            motif_bias=batch_motif_bias
         )
     if verbose:
         print(f"Batch direction vectors: {[len(v) for v in u_dict.values()]}")
@@ -426,7 +432,9 @@ def simulate(
             sigma=sigma,
             kappa_mu=kappa_mu,
             var_b=var_b,
-            seed=seed
+            seed=seed,
+            batch_motif_rules=batch_motif_rules if 'batch_motif_rules' in locals() else None,
+            glycan_sequences=glycan_sequences
         )
         Y_with_batch_clr = pd.DataFrame(Y_with_batch_clr_T.T, index=Y_clean_clr.index, columns=Y_clean_clr.columns)
         Y_with_batch = pd.DataFrame(Y_with_batch_T.T, index=Y_clean_clr.index, columns=Y_clean_clr.columns)

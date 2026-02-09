@@ -1,5 +1,5 @@
 import numpy as np
-from .utils import clr, invclr
+from glycoforge.utils import clr, invclr, find_compositional_pairs
 from scipy.stats import dirichlet
 from glycowork.motif.graph import subgraph_isomorphism
 
@@ -53,6 +53,7 @@ def generate_alpha_U(alpha_H,
     n_up = int(up_frac * n)
     n_down = int(down_frac * n)
     if motif_rules is not None and glycan_sequences is not None:
+        pairs = find_compositional_pairs(glycan_sequences, motif_rules, verbose=verbose, prefix="Bio ")
         motif_scores = np.zeros((n, 2))
         for idx, seq in enumerate(glycan_sequences):
             for motif, direction in motif_rules.items():
@@ -63,15 +64,37 @@ def generate_alpha_U(alpha_H,
                         motif_scores[idx, 1] += 1.0
         up_probs = 1.0 + motif_bias * motif_scores[:, 0]
         down_probs = 1.0 + motif_bias * motif_scores[:, 1]
+        n_pairs_to_use = min(len(pairs['substrates']), n_up // 2, n_down // 2)
+        pair_indices = rng.choice(len(pairs['substrates']), n_pairs_to_use, replace=False) if n_pairs_to_use > 0 else []
+        up_idx = [pairs['products'][i] for i in pair_indices]
+        down_idx = [pairs['substrates'][i] for i in pair_indices]
+        used_substrates = set(down_idx)
+        used_products = set(up_idx)
+        for idx in used_substrates:
+            up_probs[idx] = 0
+        for idx in used_products:
+            down_probs[idx] = 0
         up_probs /= np.sum(up_probs)
         down_probs /= np.sum(down_probs)
-        up_idx = rng.choice(n, n_up, replace=False, p=up_probs)
-        down_candidates = np.setdiff1d(np.arange(n), up_idx)
-        down_probs_adj = down_probs[down_candidates] / np.sum(down_probs[down_candidates])
-        down_idx = rng.choice(down_candidates, n_down, replace=False, p=down_probs_adj)
+        remaining_up = n_up - len(up_idx)
+        remaining_down = n_down - len(down_idx)
+        if remaining_up > 0:
+            available_up = [i for i in range(n) if i not in up_idx and i not in down_idx and i not in used_products]
+            up_probs_remaining = up_probs[available_up]
+            up_probs_remaining /= np.sum(up_probs_remaining)
+            up_idx.extend(
+                rng.choice(available_up, min(remaining_up, len(available_up)), replace=False, p=up_probs_remaining))
+        if remaining_down > 0:
+            available_down = [i for i in range(n) if i not in up_idx and i not in down_idx and i not in used_substrates]
+            down_probs_remaining = down_probs[available_down]
+            down_probs_remaining /= np.sum(down_probs_remaining)
+            down_idx.extend(rng.choice(available_down, min(remaining_down, len(available_down)), replace=False,
+                                       p=down_probs_remaining))
+        up_idx = np.array(up_idx)
+        down_idx = np.array(down_idx)
         if verbose:
             print(f"[Motif-based generation] Rules: {motif_rules}")
-            print(f"  Selected: {n_up} up, {n_down} down")
+            print(f"  Selected: {len(up_idx)} up, {len(down_idx)} down ({n_pairs_to_use} compositional pairs)")
             for motif, direction in motif_rules.items():
                 matching = [i for i in range(n) if motif in glycan_sequences[i]]
                 target_set = up_idx if direction.lower() in ["up", "upregulate", "increase"] else down_idx

@@ -6,24 +6,69 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+import re
 from sklearn.decomposition import PCA
 from scipy.stats import f_oneway, shapiro, kruskal
+from glycowork.motif.graph import subgraph_isomorphism
+
+
+def identify_motif_counterpart(glycan_sequence, motif="Neu5Ac"):
+    """Remove terminal motif and its linkage to get product.
+    Returns the product structure or None if motif not found."""
+    if not subgraph_isomorphism(glycan_sequence, motif):
+        return None
+    patterns = [
+        rf'{motif}\([a-z0-9\-]+\)',  # Neu5Ac(a2-3), Neu5Ac(a2-6), etc.
+        rf'{motif}'  # Bare motif
+    ]
+    for pattern in patterns:
+        desialylated = re.sub(pattern, '', glycan_sequence)
+        desialylated = desialylated.strip()
+        if desialylated and desialylated != glycan_sequence:
+            return desialylated
+    return None
+
+
+def find_compositional_pairs(glycan_sequences, motif_rules, verbose=False, prefix=""):
+    """Identify substrate-product pairs for compositional batch/bio effects.
+    Returns: {'substrates': [indices], 'products': [indices], 'unpaired_up': [indices], 'unpaired_down': [indices]}"""
+    substrates, products, unpaired_up, unpaired_down = [], [], [], []
+    for motif, direction in motif_rules.items():
+        motif_dir = direction.lower()
+        is_loss = motif_dir in ["down", "downregulate", "decrease"]
+        is_gain = motif_dir in ["up", "upregulate", "increase"]
+        for idx, seq in enumerate(glycan_sequences):
+            if subgraph_isomorphism(seq, motif):
+                if is_loss:
+                    product_seq = identify_motif_counterpart(seq, motif)
+                    if product_seq:
+                        try:
+                            product_idx = glycan_sequences.index(product_seq)
+                            substrates.append(idx)
+                            products.append(product_idx)
+                            if verbose:
+                                print(f"  {prefix} paired: [{idx}] {seq} → [{product_idx}] {product_seq}")
+                        except ValueError:
+                            unpaired_down.append(idx)
+                            if verbose:
+                                print(f"  {prefix} unpaired (down): [{idx}] {seq} (product not in list)")
+                    else:
+                        unpaired_down.append(idx)
+                elif is_gain:
+                    unpaired_up.append(idx)
+    return {'substrates': substrates, 'products': products, 'unpaired_up': unpaired_up, 'unpaired_down': unpaired_down}
 
 
 
 def parse_simulation_config(config):
-    """
-    Parse complete simulation configuration from YAML.
+    """Parse complete simulation configuration from YAML.
     Handles all config transformations including batch_effect_direction expansion.
-
     Args:
         config: Raw dict from yaml.safe_load()
-
     Returns:
         dict: Parsed config ready for simulate() or correction pipeline
     """
     parsed = {}
-
     # Direct copy simple parameters
     simple_params = [
         'data_source', 'data_file', 'n_glycans', 'n_H', 'n_U',
@@ -33,24 +78,19 @@ def parse_simulation_config(config):
         'u_dict', 'random_seeds', 'output_dir', 'verbose', 'save_csv', 'show_pca_plots',
         'missing_fraction', 'mnar_bias'
     ]
-
     for key in simple_params:
         if key in config:
             parsed[key] = config[key]
-
     # Parse batch_effect_direction (complex nested structure)
     if 'batch_effect_direction' in config:
         bed_config = config['batch_effect_direction']
-
         # Get default parameters
         affected_fraction = config.get('affected_fraction', (0.05, 0.30))
         positive_prob = config.get('positive_prob', 0.6)
         overlap_prob = config.get('overlap_prob', 0.5)
-
         manual_config, auto_params = _parse_batch_effect_direction(
             bed_config, affected_fraction, positive_prob, overlap_prob
         )
-
         # Store parsed version - pipeline.py will use this
         parsed['batch_effect_direction'] = manual_config
         parsed['affected_fraction'] = auto_params['affected_fraction']
@@ -61,15 +101,12 @@ def parse_simulation_config(config):
         parsed['affected_fraction'] = config.get('affected_fraction', (0.05, 0.30))
         parsed['positive_prob'] = config.get('positive_prob', 0.6)
         parsed['overlap_prob'] = config.get('overlap_prob', 0.5)
-
     return parsed
 
 
 def _parse_batch_effect_direction(bed_config, affected_fraction, positive_prob, overlap_prob):
-    """
-    Internal helper to parse batch_effect_direction nested structure.
+    """Internal helper to parse batch_effect_direction nested structure.
     Expands string keys like "1-50", "3,8,12" to individual indices.
-
     Returns:
         tuple: (manual_config or None, auto_params dict)
     """
@@ -79,21 +116,16 @@ def _parse_batch_effect_direction(bed_config, affected_fraction, positive_prob, 
         'positive_prob': positive_prob,
         'overlap_prob': overlap_prob
     }
-
     if not bed_config or not isinstance(bed_config, dict):
         return manual_config, auto_params
-
     mode = bed_config.get('mode', 'auto')
-
     if mode == 'manual':
         raw_manual = bed_config.get('manual', {})
         if raw_manual:
             manual_config = {}
-
             for batch_id, effects in raw_manual.items():
                 batch_id_int = int(batch_id)
                 manual_config[batch_id_int] = {}
-
                 for key, direction in effects.items():
                     if isinstance(key, str):
                         if '-' in key and ',' not in key:
@@ -107,21 +139,18 @@ def _parse_batch_effect_direction(bed_config, affected_fraction, positive_prob, 
                             manual_config[batch_id_int][int(key)] = int(direction)
                     else:
                         manual_config[batch_id_int][int(key)] = int(direction)
-
     # Extract auto parameters if provided
     auto_config = bed_config.get('auto', {})
     if auto_config:
         auto_params['affected_fraction'] = auto_config.get('affected_fraction', affected_fraction)
         auto_params['positive_prob'] = auto_config.get('positive_prob', positive_prob)
         auto_params['overlap_prob'] = auto_config.get('overlap_prob', overlap_prob)
-
     return manual_config, auto_params
 
 
 def load_data_from_glycowork(data_file):
     if os.path.exists(data_file):
         return pd.read_csv(data_file)
-
     # Try loading from glycowork internal datasets
     try:
         import warnings
@@ -129,22 +158,18 @@ def load_data_from_glycowork(data_file):
             warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
             import pkg_resources
             glycowork_path = pkg_resources.resource_filename('glycowork', 'glycan_data')
-
         # Add .csv extension if not present
         dataset_name = data_file if data_file.endswith('.csv') else f"{data_file}.csv"
         full_path = os.path.join(glycowork_path, dataset_name)
-
         if os.path.exists(full_path):
             return pd.read_csv(full_path)
     except Exception:
         pass
-
     # If all fails, try as regular path (will raise clear error message)
     return pd.read_csv(data_file)
 
 def clr(x, eps=1e-6):
     """Centered log-ratio transformation for compositional data.
-    
     Parameters:
     -----------
     x : array-like
@@ -157,10 +182,8 @@ def clr(x, eps=1e-6):
         CLR-transformed data with same shape as input.
     """
     x = np.asarray(x, dtype=float)
-
     # Handle zeros by replacing with small epsilon
     x_safe = np.where(x <= 0, eps, x)
-
     # Standard CLR: log(x) - geometric_mean(log(x))
     log_x = np.log(x_safe)
     if x.ndim == 1:
@@ -171,6 +194,7 @@ def clr(x, eps=1e-6):
         # Multiple samples: subtract mean across features for each sample (axis=1)
         geom_mean_log = np.mean(log_x, axis=1, keepdims=True)
         return log_x - geom_mean_log
+
 
 def invclr(z, to_percent=True, eps=1e-6):
     z = np.asarray(z, dtype=float)
@@ -184,14 +208,12 @@ def invclr(z, to_percent=True, eps=1e-6):
     return x
 
 
-
 # Plot PCA for clean and simulated data
 def plot_pca(data, #DataFrame (features x samples)
              bio_groups=None, # dict or None, e.g. {'healthy': ['healthy_1', 'healthy_2'], 'unhealthy': ['unhealthy_1']}
              batch_groups=None,
              title="PCA",
              save_path=None):
-
     pca = PCA(n_components=2)
     pca_result = pca.fit_transform(data.T)
     sample_names = data.columns.tolist()
@@ -218,7 +240,6 @@ def plot_pca(data, #DataFrame (features x samples)
     fig, axes = plt.subplots(1, n_plots, figsize=(6*n_plots, 5))
     axes = [axes] if n_plots == 1 else axes
     plot_idx = 0
-
     # Plot biological groups (with batch annotations)
     if bio_groups is not None:
         bio_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
@@ -226,22 +247,18 @@ def plot_pca(data, #DataFrame (features x samples)
             indices = [sample_names.index(c) for c in cols if c in sample_names]
             axes[plot_idx].scatter(pca_result[indices, 0], pca_result[indices, 1],
                                   c=bio_colors[i % len(bio_colors)], label=group_name, alpha=0.7, s=50)
-
             # Add batch annotations on bio-colored plot
             for idx in indices:
                 batch_label = get_batch_label(sample_names[idx])
                 if batch_label:
                     axes[plot_idx].annotate(batch_label, (pca_result[idx, 0], pca_result[idx, 1]),
-                                          xytext=(2, 2), textcoords='offset points',
-                                          fontsize=8, alpha=0.7)
-
+                                          xytext=(2, 2), textcoords='offset points', fontsize=8, alpha=0.7)
         axes[plot_idx].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
         axes[plot_idx].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
         axes[plot_idx].set_title(f'{title}\n(colored by bio-groups)')
         axes[plot_idx].legend()
         axes[plot_idx].grid(alpha=0.3)
         plot_idx += 1
-
     # Plot batch groups (with bio annotations)
     if batch_groups is not None:
         batch_colors = ['#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#FF6B35']
@@ -249,27 +266,21 @@ def plot_pca(data, #DataFrame (features x samples)
             indices = [sample_names.index(c) for c in cols if c in sample_names]
             axes[plot_idx].scatter(pca_result[indices, 0], pca_result[indices, 1],
                                   c=batch_colors[i % len(batch_colors)], label=f'Batch {batch_id}', alpha=0.7, s=50)
-
             # Add bio annotations on batch-colored plot
             for idx in indices:
                 bio_label = get_bio_label(sample_names[idx])
                 if bio_label:
                     axes[plot_idx].annotate(bio_label, (pca_result[idx, 0], pca_result[idx, 1]),
-                                          xytext=(2, 2), textcoords='offset points',
-                                          fontsize=8, alpha=0.7)
-
+                                          xytext=(2, 2), textcoords='offset points', fontsize=8, alpha=0.7)
         axes[plot_idx].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
         axes[plot_idx].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
         axes[plot_idx].set_title(f'{title}\n(colored by batches)')
         axes[plot_idx].legend()
         axes[plot_idx].grid(alpha=0.3)
-
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.show()
-
-
 
 
 def _compute_pca_and_stats(data):
@@ -279,10 +290,8 @@ def _compute_pca_and_stats(data):
     pc = pca.fit_transform(X)
     var_explained = pca.explained_variance_ratio_[:2].sum()
     total_samples = len(pc[:, 0])
-
     # Normality test (only for n >= 30)
     norm_p = shapiro(pc[:, 0])[1] if total_samples >= 30 else 0.0
-
     return pc, var_explained, total_samples, norm_p, X
 
 
@@ -290,13 +299,11 @@ def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samp
     """Calculate bio effect with centroid_distance and strength assessment."""
     bio_cat = pd.Categorical(bio_labels)
     pc1_by_bio = [pc[bio_cat==g, 0] for g in bio_cat.categories]
-
     # Statistical test
     if test_used == "Kruskal-Wallis":
         f_bio, p_bio = kruskal(*pc1_by_bio)
     else:
         f_bio, p_bio = f_oneway(*pc1_by_bio)
-
     # Effect size (eta²)
     if test_used == "ANOVA":
         ss_bio_between = sum([len(group) * (np.mean(group) - np.mean(pc[:, 0]))**2
@@ -305,11 +312,9 @@ def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samp
     else:
         bio_eta = (f_bio - len(bio_cat.categories) + 1) / (total_samples - len(bio_cat.categories) + 1)
         bio_eta = max(0, min(1, bio_eta))
-
     # Centroid distance
     centroids = [pc[bio_cat==b, :2].mean(axis=0) for b in bio_cat.categories]
     centroid_dist = np.linalg.norm(centroids[0] - centroids[1]) if len(centroids) == 2 else 0
-
     # Strength assessment
     if p_bio >= 0.05:
         strength = "ABSENT"
@@ -323,13 +328,11 @@ def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samp
     else:
         strength = "STRONG"
         strength_desc = f"Large effect (eta²={bio_eta:.1%} >= 14%)"
-
     if verbose:
         print(f"Biological effect on PC1: F={f_bio:.2f}, p={p_bio:.3e}")
         print(f"Biological effect size (eta²): {bio_eta:.1%}")
         print(f"Centroid distance (PC1-2): {centroid_dist:.2f}")
         print(f"Signal strength: {strength} - {strength_desc}")
-
     return {
         'f_statistic': float(f_bio),
         'p_value': float(p_bio),
@@ -376,7 +379,6 @@ def pvca_variance_decomposition(data, batch_labels, bio_labels, n_components=10)
 
 def check_batch_effect(data, batch_labels, bio_groups=None, verbose=True):
   pc, var_explained, total_samples, norm_p, X = _compute_pca_and_stats(data)
-  
   # Handle both bio_groups (dict) and bio_labels (array) inputs
   if bio_groups is not None:
     if isinstance(bio_groups, dict):
@@ -395,21 +397,18 @@ def check_batch_effect(data, batch_labels, bio_groups=None, verbose=True):
   else:
     bio_labels = None
     bio_groups_dict = None
-  
   # PVCA as primary metric
   if bio_labels is not None:
     pvca_results = pvca_variance_decomposition(data, batch_labels, bio_labels, n_components=10)
     batch_var_pct = pvca_results['batch_variance_pct']
     bio_var_pct = pvca_results['bio_variance_pct']
     residual_var_pct = pvca_results['residual_variance_pct']
-    
     if verbose:
       print(f"PC1-10 explain {var_explained:.1%} variance")
       print(f"\nPVCA Variance Decomposition (across {min(10, X.shape[1])} PCs):")
       print(f"  Batch:     {batch_var_pct:.1f}%")
       print(f"  Biological: {bio_var_pct:.1f}%")
       print(f"  Residual:   {residual_var_pct:.1f}%")
-    
     # Severity classification based on PVCA
     if batch_var_pct < 5:
       severity = "NONE"
@@ -431,10 +430,8 @@ def check_batch_effect(data, batch_labels, bio_groups=None, verbose=True):
       else:
         severity = "WARNING"
         severity_description = f"Batch effect exceeds biological signal (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
-    
     if verbose:
       print(f"\nOverall Quality: {severity} - {severity_description}")
-  
   # PC1 analysis as secondary/confirmatory metric
   batch_cat = pd.Categorical(batch_labels)
   pc1_by_batch = [pc[batch_cat==b, 0] for b in batch_cat.categories]
@@ -451,12 +448,10 @@ def check_batch_effect(data, batch_labels, bio_groups=None, verbose=True):
   else:
     batch_eta = (f_stat - len(batch_cat.categories) + 1) / (total_samples - len(batch_cat.categories) + 1)
     batch_eta = max(0, min(1, batch_eta))
-  
   if verbose:
     print(f"\nPC1 Analysis (confirmatory):")
     print(f"  Batch effect on PC1: F={f_stat:.2f}, p={p_val:.3e} ({test_used})")
     print(f"  Batch effect size (η²): {batch_eta:.1%}")
-  
   results = {
     'pca_variance_explained': float(var_explained),
     'batch_effect': {
@@ -466,7 +461,6 @@ def check_batch_effect(data, batch_labels, bio_groups=None, verbose=True):
       'effect_size_eta2': float(batch_eta)
     }
   }
-  
   if bio_labels is not None:
     bio_effect = _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samples, verbose)
     results['bio_effect'] = bio_effect
@@ -493,28 +487,21 @@ def check_batch_effect(data, batch_labels, bio_groups=None, verbose=True):
     return results, pc, var_batch
 
 
-
 def check_bio_effect(data_clr, bio_labels, stage_name="", verbose=True):
-
     pc, var_explained, total_samples, norm_p, _ = _compute_pca_and_stats(data_clr)
-
     # Choose test
     if total_samples < 30 or norm_p < 0.05:
         test_used = "Kruskal-Wallis"
     else:
         test_used = "ANOVA"
-
     ss_total = np.var(pc[:, 0]) * (len(pc[:, 0]) - 1)
-
     # Verbose header
     if verbose and stage_name:
         print(f"\n[{stage_name.upper()}]")
     if verbose:
         print(f"PC1-2 explain {var_explained:.1%} variance")
-
     # Evaluate bio effect with full details
     bio_effect = _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samples, verbose)
-
     return {
         'pca_variance_explained': float(var_explained),
         'bio_effect': bio_effect
@@ -524,7 +511,6 @@ def check_bio_effect(data_clr, bio_labels, stage_name="", verbose=True):
 def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0, seed=42, verbose=True):
     """Apply missing-not-at-random (MNAR) pattern to compositional data.
     Low-intensity glycans have higher probability of being missing.
-
     Parameters:
     -----------
     Y_compositional : np.ndarray or pd.DataFrame
@@ -538,7 +524,6 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0,
         Random seed for reproducibility
     verbose : bool
         Print diagnostics
-
     Returns:
     --------
     Y_missing : pd.DataFrame or np.ndarray
@@ -557,13 +542,11 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0,
         if isinstance(Y_compositional, pd.DataFrame):
             Y_clr = pd.DataFrame(Y_clr, index=Y_compositional.index, columns=Y_compositional.columns)
         return Y_compositional, Y_clr, np.zeros(Y_compositional.shape, dtype=bool), {}
-
     rng = np.random.default_rng(seed)
     is_df = isinstance(Y_compositional, pd.DataFrame)
     Y = Y_compositional.values if is_df else Y_compositional
     n_samples, n_glycans = Y.shape
     missing_mask = np.zeros_like(Y, dtype=bool)
-
     # Phase 1: Per-sample intensity-dependent probability
     for i in range(n_samples):
         sample_values = Y[i, :]
@@ -574,7 +557,6 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0,
             normalized_intensity = np.ones(n_glycans) * 0.5
         prob_missing = (1 - normalized_intensity) ** mnar_bias
         missing_mask[i, :] = rng.random(n_glycans) < prob_missing
-
     # Phase 2: Global adjustment to target fraction
     target_count = int(missing_fraction * Y.size)
     current_count = np.sum(missing_mask)
@@ -590,16 +572,13 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0,
         if n_remove > 0:
             remove_indices = rng.choice(len(missing_indices[0]), n_remove, replace=False)
             missing_mask[missing_indices[0][remove_indices], missing_indices[1][remove_indices]] = False
-
     # Apply missingness
     Y_missing = Y.copy().astype(float)
     Y_missing[missing_mask] = np.nan
-
     # Compute CLR with imputation
     Y_for_clr = Y.copy()
     Y_for_clr[missing_mask] = 1e-6
     Y_missing_clr = clr(Y_for_clr.T).T
-
     # Diagnostics
     intensity_bins = [0, 0.01, 0.1, 1.0, np.inf]
     bin_labels = ['<0.01%', '0.01-0.1%', '0.1-1%', '>1%']
@@ -609,7 +588,6 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0,
         if np.sum(mask) > 0:
             missing_rate = np.sum(missing_mask & mask) / np.sum(mask)
             missing_by_intensity[bin_labels[b_idx]] = float(missing_rate)
-
     per_sample_missing = np.sum(missing_mask, axis=1)
     diagnostics = {
         'total_missing': int(np.sum(missing_mask)),
@@ -619,7 +597,6 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0,
         'missing_rate_by_intensity': missing_by_intensity,
         'mnar_bias': float(mnar_bias)
     }
-
     if verbose:
         print(f"\n{'='*60}")
         print(f"MNAR MISSINGNESS APPLIED")
@@ -632,9 +609,7 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0,
         for bin_label, rate in missing_by_intensity.items():
             print(f"  {bin_label:>12}: {rate:.1%}")
         print(f"{'='*60}\n")
-
     if is_df:
         Y_missing = pd.DataFrame(Y_missing, index=Y_compositional.index, columns=Y_compositional.columns)
         Y_missing_clr = pd.DataFrame(Y_missing_clr, index=Y_compositional.index, columns=Y_compositional.columns)
-
     return Y_missing, Y_missing_clr, missing_mask, diagnostics
