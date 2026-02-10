@@ -48,8 +48,6 @@ def generate_alpha_U(alpha_H,
     """
     rng = np.random.default_rng(seed)
     n = len(alpha_H)
-    alpha_U = alpha_H.copy()
-    delta = np.ones(n)
     n_up = int(up_frac * n)
     n_down = int(down_frac * n)
     if motif_rules is not None and glycan_sequences is not None:
@@ -66,52 +64,59 @@ def generate_alpha_U(alpha_H,
         down_probs = 1.0 + motif_bias * motif_scores[:, 1]
         n_pairs_to_use = min(len(pairs['substrates']), n_up // 2, n_down // 2)
         pair_indices = rng.choice(len(pairs['substrates']), n_pairs_to_use, replace=False) if n_pairs_to_use > 0 else []
-        up_idx = [pairs['products'][i] for i in pair_indices]
-        down_idx = [pairs['substrates'][i] for i in pair_indices]
-        used_substrates = set(down_idx)
-        used_products = set(up_idx)
-        for idx in used_substrates:
-            up_probs[idx] = 0
-        for idx in used_products:
-            down_probs[idx] = 0
-        up_probs /= np.sum(up_probs)
-        down_probs /= np.sum(down_probs)
-        remaining_up = n_up - len(up_idx)
-        remaining_down = n_down - len(down_idx)
+        # Work in proportion space for coupled adjustments
+        p_H = alpha_H / np.sum(alpha_H)
+        p_U = p_H.copy()
+        # Group products by substrate (handles 1:many case)
+        substrate_to_products = {}
+        for i in pair_indices:
+            sub = pairs['substrates'][i]
+            prod = pairs['products'][i]
+            if sub not in substrate_to_products:
+                substrate_to_products[sub] = []
+            substrate_to_products[sub].append(prod)
+        # Apply coupled scaling to paired glycans
+        paired_indices = set()
+        for sub_idx, prod_indices in substrate_to_products.items():
+            scale = rng.uniform(*down_scale_range)
+            amount_lost = p_U[sub_idx] * (1 - scale)
+            p_U[sub_idx] *= scale
+            for prod_idx in prod_indices:
+                p_U[prod_idx] += amount_lost / len(prod_indices)
+            paired_indices.add(sub_idx)
+            paired_indices.update(prod_indices)
+        up_idx_unpaired = [i for i in pairs['unpaired_up'] if i not in paired_indices]
+        down_idx_unpaired = [i for i in pairs['unpaired_down'] if i not in paired_indices]
+        # Count how many paired glycans we have
+        n_products_paired = sum(len(prods) for prods in substrate_to_products.values())
+        n_substrates_paired = len(substrate_to_products)
+        # Add remaining slots if needed
+        remaining_up = n_up - n_products_paired
+        remaining_down = n_down - n_substrates_paired
         if remaining_up > 0:
-            available_up = [i for i in range(n) if i not in up_idx and i not in down_idx and i not in used_products]
+            available_up = [i for i in range(n) if i not in paired_indices]
             up_probs_remaining = up_probs[available_up]
             up_probs_remaining /= np.sum(up_probs_remaining)
-            up_idx.extend(
+            up_idx_unpaired.extend(
                 rng.choice(available_up, min(remaining_up, len(available_up)), replace=False, p=up_probs_remaining))
         if remaining_down > 0:
-            available_down = [i for i in range(n) if i not in up_idx and i not in down_idx and i not in used_substrates]
+            available_down = [i for i in range(n) if i not in paired_indices]
             down_probs_remaining = down_probs[available_down]
             down_probs_remaining /= np.sum(down_probs_remaining)
-            down_idx.extend(rng.choice(available_down, min(remaining_down, len(available_down)), replace=False,
-                                       p=down_probs_remaining))
-        up_idx = np.array(up_idx)
-        down_idx = np.array(down_idx)
-        if verbose:
-            print(f"[Motif-based generation] Rules: {motif_rules}")
-            print(f"  Selected: {len(up_idx)} up, {len(down_idx)} down ({n_pairs_to_use} compositional pairs)")
-            for motif, direction in motif_rules.items():
-                matching = [i for i in range(n) if motif in glycan_sequences[i]]
-                target_set = up_idx if direction.lower() in ["up", "upregulate", "increase"] else down_idx
-                selected = len(set(matching) & set(target_set))
-                print(f"  '{motif}' ({direction}): {len(matching)} matches, {selected} selected")
-    else:
-        up_idx = rng.choice(n, n_up, replace=False)
-        down_candidates = np.setdiff1d(np.arange(n), up_idx)
-        down_idx = rng.choice(down_candidates, n_down, replace=False)
-    up_scales = rng.uniform(*up_scale_range, size=n_up)
-    down_scales = rng.uniform(*down_scale_range, size=n_down)
-    alpha_U[up_idx] *= up_scales
-    alpha_U[down_idx] *= down_scales
-    delta[up_idx] = up_scales
-    delta[down_idx] = down_scales
-    alpha_U = np.clip(alpha_U, 1e-3, None)
-    return alpha_U, delta
+            down_idx_unpaired.extend(rng.choice(available_down, min(remaining_down, len(available_down)), replace=False,
+                                                p=down_probs_remaining))
+        # Apply independent scales to unpaired glycans
+        for idx in up_idx_unpaired:
+            p_U[idx] *= rng.uniform(*up_scale_range)
+        for idx in down_idx_unpaired:
+            p_U[idx] *= rng.uniform(*down_scale_range)
+        # Renormalize and convert back to alpha
+        p_U = p_U / np.sum(p_U)
+        alpha_U = np.sum(alpha_H) * p_U
+        alpha_U = np.clip(alpha_U, 1e-3, None)
+        # Build delta for return (paired glycans have coupled deltas)
+        delta = p_U / p_H
+        return alpha_U, delta
 
 def robust_effect_size_processing(effect_sizes, 
                                   winsorize_percentile=None, baseline_method="median", verbose=False):
