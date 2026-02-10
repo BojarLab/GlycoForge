@@ -1,7 +1,6 @@
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -10,6 +9,67 @@ import re
 from sklearn.decomposition import PCA
 from scipy.stats import f_oneway, shapiro, kruskal
 from glycowork.motif.graph import subgraph_isomorphism
+
+
+_network_cache = {}
+
+
+def find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose=False, prefix=""):
+  """Identify substrate-product pairs using glycowork's biosynthetic network.
+  More robust than string matching since it respects biosynthetic relationships.
+  Network is cached based on glycan sequences to avoid expensive reconstruction.
+  Returns: {'substrates': [indices that decrease], 'products': [indices that increase],
+            'unpaired_up': [unpaired increasing], 'unpaired_down': [unpaired decreasing]}"""
+  from glycowork.network.biosynthesis import construct_network
+  cache_key = tuple(glycan_sequences)
+  if cache_key not in _network_cache:
+    try:
+      network = construct_network(glycan_sequences)
+      _network_cache[cache_key] = network
+      if verbose:
+        print(f"  {prefix}Constructed and cached network with {len(network.nodes())} nodes, {len(network.edges())} edges")
+    except Exception as e:
+      if verbose:
+        print(f"  {prefix}Warning: construct_network failed ({e}), falling back to string matching")
+      _network_cache[cache_key] = None
+      return None
+  else:
+    network = _network_cache[cache_key]
+    if network is None:
+      return None
+    if verbose:
+      print(f"  {prefix}Using cached network with {len(network.nodes())} nodes, {len(network.edges())} edges")
+  real_nodes = [node for node in network.nodes() if network.nodes[node].get('virtual', 0) == 0]
+  substrates, products = [], []
+  for motif, direction in motif_rules.items():
+    is_loss = direction.lower() in ["down", "downregulate", "decrease"]
+    is_gain = direction.lower() in ["up", "upregulate", "increase"]
+    for u, v, data in network.edges(data=True):
+      edge_label = data.get('diffs', '')
+      if motif in edge_label and u in real_nodes and v in real_nodes:
+        try:
+          u_idx = glycan_sequences.index(u)
+          v_idx = glycan_sequences.index(v)
+          if is_loss:
+            substrates.append(v_idx)
+            products.append(u_idx)
+          elif is_gain:
+            substrates.append(u_idx)
+            products.append(v_idx)
+          if verbose:
+            direction_str = "↓" if is_loss else "↑"
+            print(f"  {prefix}network pair: [{u_idx}] {u} ↔ [{v_idx}] {v} (edge: {edge_label}, {motif} {direction_str})")
+        except ValueError:
+          pass
+  unpaired_up, unpaired_down = [], []
+  for idx, seq in enumerate(glycan_sequences):
+    if subgraph_isomorphism(seq, motif):
+      if idx not in substrates and idx not in products:
+        if is_loss:
+          unpaired_down.append(idx)
+        elif is_gain:
+          unpaired_up.append(idx)
+  return {'substrates': substrates, 'products': products, 'unpaired_up': unpaired_up, 'unpaired_down': unpaired_down}
 
 
 def identify_motif_counterpart(glycan_sequence, motif="Neu5Ac"):
@@ -31,7 +91,13 @@ def identify_motif_counterpart(glycan_sequence, motif="Neu5Ac"):
 
 def find_compositional_pairs(glycan_sequences, motif_rules, verbose=False, prefix=""):
     """Identify substrate-product pairs for compositional batch/bio effects.
+    Tries network-based approach first (robust), falls back to string matching if needed.
     Returns: {'substrates': [indices], 'products': [indices], 'unpaired_up': [indices], 'unpaired_down': [indices]}"""
+    network_result = find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose=verbose, prefix=prefix)
+    if network_result is not None:
+      return network_result
+    if verbose:
+      print(f"  {prefix}Using string-matching fallback")
     substrates, products, unpaired_up, unpaired_down = [], [], [], []
     for motif, direction in motif_rules.items():
         motif_dir = direction.lower()
@@ -47,7 +113,7 @@ def find_compositional_pairs(glycan_sequences, motif_rules, verbose=False, prefi
                             substrates.append(idx)
                             products.append(product_idx)
                             if verbose:
-                                print(f"  {prefix} paired: [{idx}] {seq} → [{product_idx}] {product_seq}")
+                                print(f"  {prefix}string pair: [{idx}] {seq} → [{product_idx}] {product_seq}")
                         except ValueError:
                             unpaired_down.append(idx)
                             if verbose:
@@ -57,7 +123,6 @@ def find_compositional_pairs(glycan_sequences, motif_rules, verbose=False, prefi
                 elif is_gain:
                     unpaired_up.append(idx)
     return {'substrates': substrates, 'products': products, 'unpaired_up': unpaired_up, 'unpaired_down': unpaired_down}
-
 
 
 def parse_simulation_config(config):
@@ -324,7 +389,7 @@ def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samp
         strength_desc = f"Small effect (eta²={bio_eta:.1%} < 6%)"
     elif bio_eta < 0.14:
         strength = "MODERATE"
-        strength_desc = f"Medium effect (6% ≤ eta²={bio_eta:.1%} < 14%)"
+        strength_desc = f"Medium effect (6% =< eta²={bio_eta:.1%} < 14%)"
     else:
         strength = "STRONG"
         strength_desc = f"Large effect (eta²={bio_eta:.1%} >= 14%)"
