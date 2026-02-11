@@ -117,6 +117,20 @@ def generate_alpha_U(alpha_H,
         # Build delta for return (paired glycans have coupled deltas)
         delta = p_U / p_H
         return alpha_U, delta
+    else:
+        # Non-motif mode: simple random scaling
+        indices = np.arange(n)
+        rng.shuffle(indices)
+        up_idx = indices[:n_up]
+        down_idx = indices[n_up:n_up + n_down]
+        alpha_U = alpha_H.copy()
+        for idx in up_idx:
+            alpha_U[idx] *= rng.uniform(*up_scale_range)
+        for idx in down_idx:
+            alpha_U[idx] *= rng.uniform(*down_scale_range)
+        alpha_U = np.clip(alpha_U, 1e-3, None)
+        delta = alpha_U / alpha_H
+        return alpha_U, delta
 
 def robust_effect_size_processing(effect_sizes, 
                                   winsorize_percentile=None, baseline_method="median", verbose=False):
