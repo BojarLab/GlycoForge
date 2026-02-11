@@ -93,10 +93,9 @@ def define_batch_direction(
     return u_dict, batch_effect_direction
 
 
-# according to column name "healthy_" and "unhealthy_"
-def stratified_batches_from_columns(columns, n_batches=3, seed=None, verbose=True):
+def stratified_batches_from_columns(columns, n_batches=3, seed=None, verbose=True, control_prefix="healthy_"):
     rng = np.random.default_rng(seed)
-    labels = np.array([0 if str(c).startswith("healthy_") else 1 for c in columns])
+    labels = np.array([0 if str(c).startswith(control_prefix) else 1 for c in columns])
     batch_labels = np.zeros(len(labels), dtype=int)
     for g in np.unique(labels):
         idx = np.where(labels == g)[0]
@@ -161,14 +160,17 @@ def apply_batch_effect(Y_clean # (samples x glycans) clean CLR matrix
         # mean shift term
         mean_shift = kappa_mu * sigma * u_b
         # variance inflation (batch-specific scale)
-        var_scale = batch_var_scales[b]
-        var_scalor = rng.normal(loc=0.0, scale=np.sqrt(var_scale) * sigma, size=n_glycans)
-        if b in compositional_pairs:
-            pairs = compositional_pairs[b]
-            for sub_idx, prod_idx in zip(pairs['substrates'], pairs['products']):
-                shared_noise = rng.normal(loc=0.0, scale=np.sqrt(var_scale) * sigma[sub_idx])
-                var_scalor[sub_idx] = -shared_noise
-                var_scalor[prod_idx] = shared_noise
+        if var_b > 0:
+            var_scale = batch_var_scales[b]
+            var_scalor = rng.normal(loc = 0.0, scale = np.sqrt(var_scale) * sigma, size = n_glycans)
+            if b in compositional_pairs:
+                pairs = compositional_pairs[b]
+                for sub_idx, prod_idx in zip(pairs['substrates'], pairs['products']):
+                    shared_noise = rng.normal(loc = 0.0, scale = np.sqrt(var_scale) * sigma[sub_idx])
+                    var_scalor[sub_idx] = -shared_noise
+                    var_scalor[prod_idx] = shared_noise
+        else:
+            var_scalor = np.zeros(n_glycans)
         # apply to sample
         Y_with_batch_clr[i, :] += mean_shift + var_scalor
     Y_with_batch_compositional = np.zeros_like(Y_with_batch_clr)
