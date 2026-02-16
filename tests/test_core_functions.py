@@ -401,16 +401,17 @@ def test_batch_motif_effects():
     n_glycans = len(glycan_sequences)
     
     # Define different motif preferences for each batch
-    # Note: Avoid empty dict as it triggers a bug in find_compositional_pairs_from_network
+    # Test includes empty dict to verify bug fix for UnboundLocalError
     batch_motif_rules = {
         1: {"Fuc": "up"},       # Batch 1 prefers Fuc upregulation
         2: {"Neu5Ac": "down"},  # Batch 2 prefers Neu5Ac downregulation
+        3: {}                    # Batch 3 has no specific preference (tests empty dict handling)
     }
     
     u_dict, raw_direction = define_batch_direction(
         batch_effect_direction=None,  # Auto-generate
         n_glycans=n_glycans,
-        n_batches=2,  # Changed to 2 batches to match batch_motif_rules
+        n_batches=3,  # Changed back to 3 batches to test empty dict case
         glycan_sequences=glycan_sequences,
         batch_motif_rules=batch_motif_rules,
         motif_bias=0.8,
@@ -419,8 +420,8 @@ def test_batch_motif_effects():
     )
     
     # Validation 1: u_dict contains all batches
-    assert len(u_dict) == 2
-    assert all(b in u_dict for b in [1, 2])
+    assert len(u_dict) == 3
+    assert all(b in u_dict for b in [1, 2, 3])
     
     # Validation 2: Each direction vector has correct dimensions
     for b, vec in u_dict.items():
@@ -450,7 +451,12 @@ def test_batch_motif_effects():
             # Use relaxed threshold to account for randomness
             assert fuc_ratio_batch1 >= fuc_ratio_overall * 0.7
     
-    # Validation 5: Ensure at least some glycans are affected
+    # Validation 5: Batch 3 (empty motif rules) should still generate effects
+    # This validates the bug fix for empty dict handling
+    batch3_affected = list(raw_direction[3].keys())
+    assert len(batch3_affected) > 0, "Batch 3 with empty motif_rules should still affect some glycans"
+    
+    # Validation 6: Ensure at least some glycans are affected overall
     total_affected = sum(len(effects) for effects in raw_direction.values())
     assert total_affected > 0
 

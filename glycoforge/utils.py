@@ -21,6 +21,11 @@ def find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose
   Returns: {'substrates': [indices that decrease], 'products': [indices that increase],
             'unpaired_up': [unpaired increasing], 'unpaired_down': [unpaired decreasing]}"""
   from glycowork.network.biosynthesis import construct_network
+  
+  # Early return for empty motif_rules to avoid UnboundLocalError
+  if not motif_rules:
+    return {'substrates': [], 'products': [], 'unpaired_up': [], 'unpaired_down': []}
+  
   cache_key = tuple(glycan_sequences)
   if cache_key not in _network_cache:
     try:
