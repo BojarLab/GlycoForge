@@ -623,7 +623,8 @@ def generate_comprehensive_metrics(seed, output_dir,
                                  batch_metrics_after,
                                  diff_expr_results,
                                  metadata,
-                                 batch_check_results=None):
+                                 batch_check_results=None,
+                                 imputation_results=None):
     
     # Build run_info
     run_info = {
@@ -849,3 +850,13 @@ def generate_comprehensive_metrics(seed, output_dir,
     print(f"Correction metrics saved to: {output_file}")
     
     return correction_data
+
+def evaluate_imputation(Y_true, Y_imputed, missing_mask):
+  true_vals = Y_true.values[missing_mask]
+  imputed_vals = Y_imputed.values[missing_mask]
+  if len(true_vals) == 0:
+    return {'rmse': 0.0, 'relative_rmse': 0.0, 'correlation': 0.0, 'n_missing': 0}
+  rmse = float(np.sqrt(np.mean((true_vals - imputed_vals) ** 2)))
+  rel_rmse = rmse / max(float(np.mean(np.abs(true_vals))), 1e-10)
+  corr = float(np.corrcoef(true_vals, imputed_vals)[0, 1]) if np.std(true_vals) > 1e-10 and np.std(imputed_vals) > 1e-10 else 0.0
+  return {'rmse': rmse, 'relative_rmse': rel_rmse, 'correlation': 0.0 if np.isnan(corr) else corr, 'n_missing': int(np.sum(missing_mask))}

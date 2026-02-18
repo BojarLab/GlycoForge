@@ -258,3 +258,30 @@ def stratified_combat(data, batch, bio_group):
   X_corrected = np.maximum(X_corrected, 1e-10)
   X_corrected = X_corrected / X_corrected.sum(axis=1, keepdims=True)
   return X_corrected.T
+
+def impute_half_min(data):
+  result = data.copy()
+  for i in range(result.shape[0]):
+    row = result.iloc[i, :]
+    min_val = row.dropna().min()
+    result.iloc[i, :] = row.fillna(min_val / 2 if pd.notna(min_val) and min_val > 0 else 1e-6)
+  return result
+
+def impute_median(data):
+  result = data.copy()
+  for i in range(result.shape[0]):
+    row = result.iloc[i, :]
+    median_val = row.dropna().median()
+    result.iloc[i, :] = row.fillna(median_val if pd.notna(median_val) else 1e-6)
+  return result
+
+def impute_knn(data, k=5):
+  from sklearn.impute import KNNImputer
+  result = data.copy()
+  imputer = KNNImputer(n_neighbors=min(k, data.shape[1] - 1))
+  imputed = imputer.fit_transform(result.T.values)
+  result[:] = imputed.T
+  return result
+
+def impute_min(data, eps=1e-6):
+  return data.fillna(eps)

@@ -4,8 +4,9 @@
 
 ## Key Features
 
-- **Two simulation modes**: Fully synthetic or hybrid (extract factor from input reference data + simulate batch effect)
+- **Two simulation modes**: Fully synthetic or templated (extract factor from input reference data + simulate batch effect)
 - **Controllable effects injection**: Systematic grid search over biological effect or batch effect strength parameters
+- **Motif-level effects**: For both bio and batch effects, desired motif differences (e.g., `Neu5Ac: down`) can be introduced. These are propagated in a dynamically constructed biosynthetic network to ensure physiological glycomics data (e.g., corresponding increase in desialylated glycans in the example of `Neu5Ac: down`)
 - **MNAR missing data simulation**: Mimics left-censored patterns biased toward low-abundance glycans
 
 ## Quick Start
@@ -56,7 +57,7 @@ We keep everything in the CLR (centered log-ratio) space:
 The pipeline entry point is `glycoforge.simulate()` with two modes controlled by `data_source`. Configuration files are in `sample_config/`.
 
 <details>
-<summary><b>Simplified mode (<code>data_source="simulated"</code>)</b> – Fully synthetic simulation (click to show detail introduction)</summary>
+<summary><b>Synthetic mode (<code>data_source="simulated"</code>)</b> – Fully synthetic simulation (click to show detail introduction)</summary>
 
 <br>
 
@@ -64,7 +65,7 @@ No real data dependency. Ideal for controlled experiments with known ground trut
 
 **Pipeline steps:**
 
-1. Initializes uniform healthy baseline: `alpha_H = ones(n_glycans) * 10`
+1. Initializes log-normal healthy baseline: `alpha_H = ones(n_glycans) * 10`
 2. For each random seed, generates `alpha_U` by randomly scaling `alpha_H`:
    - `up_frac` (default 30%) upregulated with scale factors from `up_scale_range=(1.1, 3.0)`
    - `down_frac` (default 30%) downregulated with scale factors from `down_scale_range=(0.3, 0.9)`
@@ -83,7 +84,7 @@ No real data dependency. Ideal for controlled experiments with known ground trut
 </details>
 
 <details>
-<summary><b>Hybrid mode (<code>data_source="real"</code>)</b> – Extract biological effect from input reference data + simulate batch effect (click to show detail introduction) </summary>
+<summary><b>Templated mode (<code>data_source="real"</code>)</b> – Extract biological effect from input reference data + simulate batch effect (click to show detail introduction) </summary>
 
 <br>
 

@@ -2,13 +2,14 @@ import os
 import json
 import pandas as pd
 import numpy as np
-from glycoforge import simulate, invclr,plot_pca
+from glycoforge import simulate, invclr, clr, plot_pca
 from .methods import combat, add_noise_to_zero_variance_features
 from .evaluation import (
     quantify_batch_effect_impact,
     evaluate_biological_preservation,
     compare_differential_expression,
-    generate_comprehensive_metrics
+    generate_comprehensive_metrics,
+    evaluate_imputation
 )
 
 
@@ -90,25 +91,48 @@ def process_corrections(config):
             f for f in os.listdir(combo_dir) 
             if f.startswith('metadata_seed') and f.endswith('.json')
         ])
-        
         combo_results = []
-        
         for seed_idx, metadata_file in enumerate(metadata_files):
             # Extract seed number from filename
             seed = int(metadata_file.replace('metadata_seed', '').replace('.json', ''))
-            
             if verbose:
                 print(f"  [{seed_idx + 1}/{len(metadata_files)}] Processing seed={seed}")
-            
             # Read data files generated in Phase 1
             Y_clean = pd.read_csv(f"{combo_dir}/1_Y_clean_seed{seed}.csv", index_col=0)
             Y_clean_clr = pd.read_csv(f"{combo_dir}/1_Y_clean_clr_seed{seed}.csv", index_col=0)
             Y_with_batch = pd.read_csv(f"{combo_dir}/2_Y_with_batch_seed{seed}.csv", index_col=0)
             Y_with_batch_clr = pd.read_csv(f"{combo_dir}/2_Y_with_batch_clr_seed{seed}.csv", index_col=0)
-            
             with open(f"{combo_dir}/metadata_seed{seed}.json", 'r') as f:
                 metadata = json.load(f)
-            
+            missing_file = f"{combo_dir}/3_Y_with_batch_and_missing_seed{seed}.csv"
+            imputation_results = {}
+            if os.path.exists(missing_file):
+                Y_missing = pd.read_csv(missing_file, index_col = 0)
+                missing_mask = Y_missing.isna().values
+                if verbose:
+                    n_missing = int(missing_mask.sum())
+                    print(
+                        f"    Found missing data: {n_missing} values ({n_missing / missing_mask.size:.1%}), benchmarking imputation methods")
+                for method_name, method_fn in [('half_min', impute_half_min), ('median', impute_median),
+                                               ('knn', impute_knn), ('min', impute_min)]:
+                    Y_imputed = method_fn(Y_missing)
+                    imp_metrics = evaluate_imputation(Y_with_batch, Y_imputed, missing_mask)
+                    Y_imputed_clr_values = clr(Y_imputed.values.T).T
+                    Y_imputed_clr = pd.DataFrame(Y_imputed_clr_values, index = Y_imputed.index,
+                                                 columns = Y_imputed.columns)
+                    Y_imputed_clr_fixed = add_noise_to_zero_variance_features(Y_imputed_clr, noise_level = 1e-10,
+                                                                              random_seed = seed)
+                    Y_combat_on_imputed_clr_vals = combat(Y_imputed_clr_fixed.values, batch_labels, mod = bio_labels)
+                    Y_combat_on_imputed_clr = pd.DataFrame(Y_combat_on_imputed_clr_vals,
+                                                           index = Y_imputed_clr_fixed.index,
+                                                           columns = Y_imputed_clr_fixed.columns)
+                    batch_after_imputation = quantify_batch_effect_impact(Y_combat_on_imputed_clr, batch_labels,
+                                                                          bio_groups, verbose = False)
+                    imputation_results[method_name] = {**imp_metrics,
+                                                       'batch_metrics_after_combat': batch_after_imputation}
+                    if verbose:
+                        print(
+                            f"    [{method_name}] RMSE={imp_metrics['rmse']:.4f}, rel_RMSE={imp_metrics['relative_rmse']:.4f}, corr={imp_metrics['correlation']:.4f}, PVCA_batch={batch_after_imputation.get('pvca_batch_variance', float('nan')):.2f}%")
             batch_labels = np.array(metadata['sample_info']['batch_labels'])
             bio_labels = np.array(metadata['sample_info']['bio_labels'])
             bio_groups = metadata['sample_info']['bio_groups']
@@ -174,7 +198,8 @@ def process_corrections(config):
                 batch_metrics_after=batch_metrics_after,
                 diff_expr_results=diff_expr_results,
                 metadata=metadata,
-                batch_check_results=batch_check_results
+                batch_check_results=batch_check_results,
+                imputation_results=imputation_results if imputation_results else None
             )
             
             if show_pca_plots:

@@ -173,9 +173,10 @@ def simulate(
         real_effect_sizes = None
         alpha_U_base = None  # Will generate synthetically in loop
         if motif_rules is not None and glycan_sequences is None:
-            glycan_sequences = [f"glycan_{i + 1}" for i in range(n_glycans)]
+            from glycowork.motif.tokenization import get_random_glycan
+            glycan_sequences = get_random_glycan(n = n_glycans, glycan_class = 'O')
             if verbose:
-                print("[Simulated] Warning: motif_rules provided but no glycan_sequences, using placeholders")
+                print(f"[Simulated] motif_rules provided without glycan_sequences; sampled {n_glycans} random O-glycans")
     elif data_source == "real":
         df = load_data_from_glycowork(data_file)
         # Get column prefixes (with defaults)
