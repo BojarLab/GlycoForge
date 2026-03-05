@@ -5,6 +5,7 @@
 ## Key Features
 
 - **Two simulation modes**: Fully synthetic or templated (extract factor from input reference data + simulate batch effect)
+- **Paired multi-glycome simulation**: `simulate_paired()` generates two glycomic datasets (e.g., _N_- and _O_-glycomics) from the same biological samples, with shared batch labels and optional controllable cross-class coupling
 - **Controllable effects injection**: Systematic grid search over biological effect or batch effect strength parameters
 - **Motif-level effects**: For both bio and batch effects, desired motif differences (e.g., `Neu5Ac: down`) can be introduced. These are propagated in a dynamically constructed biosynthetic network to ensure physiological glycomics data (e.g., corresponding increase in desialylated glycans in the example of `Neu5Ac: down`)
 - **MNAR missing data simulation**: Mimics left-censored patterns biased toward low-abundance glycans
@@ -14,7 +15,7 @@
 ### Installation
 
 * Python >= 3.10 required. 
-* Core dependency: `glycowork>=1.6.4`
+* Core dependency: `glycowork>=1.7.1`
 
 ```bash
 pip install glycoforge
@@ -54,7 +55,7 @@ We keep everything in the CLR (centered log-ratio) space:
 
 ## Simulation Modes
 
-The pipeline entry point is `glycoforge.simulate()` with two modes controlled by `data_source`. Configuration files are in `sample_config/`.
+`glycoforge.simulate()` generates a single glycomic dataset per entity in two modes controlled by `data_source`. For paired multi-glycome data from the same samples, use `glycoforge.simulate_paired()` instead (see below). Configuration files are in `sample_config/`.
 
 <details>
 <summary><b>Synthetic mode (<code>data_source="simulated"</code>)</b> – Fully synthetic simulation (click to show detail introduction)</summary>
@@ -114,6 +115,31 @@ Starts from real glycomics data to preserve biological signal structure. Accepts
 13. Grid search over `bio_strength`, `k_dir`, `variance_ratio`, `kappa_mu`, `var_b` to systematically test biological signal and batch effect interactions
 
 **Key parameters:** `data_file`, `column_prefix`, `bio_strength`, `k_dir`, `variance_ratio`, `differential_mask`, `winsorize_percentile`, `baseline_method`, `kappa_mu`, `var_b`, `missing_fraction`, `mnar_bias`
+
+</details>
+
+<details>
+<summary><b>Paired mode (<code>simulate_paired()</code>)</b> – Two glycomic classes from the same biological samples (click to show detail introduction)</summary>
+
+<br>
+
+Generates two glycomic datasets (e.g., _N_- and _O_-glycomics) that share sample identity: the same `n_H` healthy and `n_U` unhealthy individuals appear in both, so `bio_labels`, `batch_labels`, and column names are identical across glycomes. Each glycome is otherwise independently parameterised (different glycan counts, Dirichlet parameters, biological effect structures, and batch direction vectors).
+
+**Pipeline steps:**
+
+1. Draws independent log-normal healthy baselines `alpha_H_A` and `alpha_H_B` (fixed seeds 42/43 for reproducibility)
+2. Generates per-glycome `alpha_U` using independent seeds so biological effects are not correlated by seed reuse
+3. Simulates clean compositional data for both glycomes from their respective Dirichlet parameters
+4. Optionally injects cross-class coupling in CLR space via shared latent factors `Z ~ N(0, I)`:
+   - `Y_A_clr += coupling_strength * (Z @ U_A.T) * sigma_A`
+   - `Y_B_clr += coupling_strength * (Z @ U_B.T) * sigma_B`
+   - At `coupling_strength=0` the two glycomes are conditionally independent given sample labels; induced HSIC scales as `coupling_strength²`
+   - Direction matrices `U_A`, `U_B` can be biased toward motif-matching glycans via `coupling_motif_A/B`
+5. Round-trips through `invclr` to restore simplex validity after coupling injection
+6. Applies shared batch labels with independent per-glycome direction vectors (same samples in the same batches, but different glycans affected)
+7. Applies MNAR missingness independently per glycome (independent seeds prevent artificially correlated missing-value patterns)
+
+**Key parameters:** `n_glycans_A/B`, `bio_strength_A/B`, `k_dir_A/B`, `variance_ratio_A/B`, `coupling_strength`, `n_coupling_components`, `coupling_motif_A/B`, `kappa_mu`, `var_b`, `missing_fraction`, `mnar_bias`
 
 </details>
 

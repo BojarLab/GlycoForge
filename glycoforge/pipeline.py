@@ -8,7 +8,7 @@ import contextlib
 import io
 from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_dirichlet_params_from_real_data, define_differential_mask
 from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
-from glycoforge.utils import clr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness
+from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness
 
 
 def simulate(
@@ -640,3 +640,347 @@ def simulate(
             'output_dir': output_dir
         }
     }
+
+
+def simulate_paired(
+  # ── Shared sample structure ────────────────────────────────────────────────
+  # These are imposed identically on both glycomes; they encode the fact that
+  # every sample appears in both datasets (e.g., same patient, same tube).
+  n_H=15,
+  n_U=15,
+  n_batches=3,
+  # ── Glycome A ──────────────────────────────────────────────────────────────
+  n_glycans_A=50,
+  bio_strength_A=1.5,
+  k_dir_A=100,
+  variance_ratio_A=1.5,
+  up_frac_A=0.3,
+  down_frac_A=0.35,
+  glycan_sequences_A=None,
+  motif_rules_A=None,
+  motif_bias_A=0.8,
+  batch_motif_rules_A=None,
+  # ── Glycome B ──────────────────────────────────────────────────────────────
+  n_glycans_B=50,
+  bio_strength_B=1.5,
+  k_dir_B=100,
+  variance_ratio_B=1.5,
+  up_frac_B=0.3,
+  down_frac_B=0.35,
+  glycan_sequences_B=None,
+  motif_rules_B=None,
+  motif_bias_B=0.8,
+  batch_motif_rules_B=None,
+  # ── Cross-class coupling (optional) ────────────────────────────────────────
+  # At coupling_strength=0 the two glycomes are statistically independent
+  # conditioned on the shared sample structure. Increasing it injects shared
+  # latent variation proportional to coupling_strength², making cross-glycome
+  # HSIC detectable. See inject_coupling in sim_coupled.py for the full model.
+  coupling_strength=0.5,
+  n_coupling_components=1,
+  coupling_motif_A=None,   # {motif: any} — direction values ignored, presence biases U_A
+  coupling_motif_B=None,
+  coupling_motif_bias=0.8,
+  # ── Shared batch parameters ────────────────────────────────────────────────
+  # Both glycomes share batch labels (same sample → same batch), but batch
+  # direction vectors are generated independently so the specific glycans
+  # affected and their directions differ between glycomes.
+  kappa_mu=1.0,
+  var_b=0.5,
+  affected_fraction=(0.05, 1),
+  positive_prob=0.6,
+  overlap_prob=0.5,
+  # ── Missingness ────────────────────────────────────────────────────────────
+  # Applied independently per glycome (different random seeds) so that the
+  # missing-value patterns are not artificially correlated.
+  missing_fraction=0.0,
+  mnar_bias=2.0,
+  # ── Meta ───────────────────────────────────────────────────────────────────
+  random_seeds=None,
+  output_dir="results/paired/",
+  verbose=False,
+  save_csv=True,
+):
+  """Simulate two paired glycomic datasets measured on the same biological samples.
+
+  The fundamental guarantee of this function is sample identity: the same n_H healthy
+  and n_U unhealthy individuals appear in both glycomes, so bio_labels, batch_labels,
+  and column names are shared. This is the correct data-generating process for studies
+  that measure, for example, N- and O-glycomics from the same patient serum aliquots.
+
+  Each glycome is otherwise independently parameterised — different glycan counts,
+  different Dirichlet concentration parameters, different biological effect structures,
+  and different batch direction vectors. The only shared quantities are the sample-level
+  group memberships and batch assignments.
+
+  Cross-class coupling is controlled by *coupling_strength* (default 0). At zero the
+  two CLR matrices are conditionally independent given the sample labels. Increasing it
+  injects shared latent factors in CLR space (see inject_coupling in sim_coupled.py),
+  making HSIC between the two glycomes detectable. The coupling is added after clean
+  data generation and before batch effects, modelling biochemical co-regulation (e.g.
+  shared sugar nucleotide pools) that would be present in vivo but attenuated by
+  downstream sample handling variation.
+
+  Parameters
+  ----------
+  n_H, n_U : int
+      Number of healthy and unhealthy samples. Identical for both glycomes.
+  n_glycans_A/B : int
+      Number of glycan features in each glycome.
+  bio_strength_A/B : float
+      Scaling of the biological effect in CLR space for each glycome. Higher values
+      produce more separated healthy/unhealthy distributions.
+  k_dir_A/B : float
+      Dirichlet concentration parameter controlling within-group variance. Higher
+      values produce tighter, less variable samples.
+  variance_ratio_A/B : float
+      Ratio of unhealthy to healthy variance (unhealthy k_dir = k_dir / variance_ratio).
+  up_frac_A/B, down_frac_A/B : float
+      Fraction of glycans up/down-regulated in the unhealthy group.
+  glycan_sequences_A/B : list of str or None
+      IUPAC glycan sequences for motif-based effects. If None, glycans are indexed
+      numerically and motif_rules are ignored.
+  motif_rules_A/B : dict or None
+      {motif: direction} for biological effects. Passed to generate_alpha_U.
+  motif_bias_A/B : float
+      Strength of motif preference in biological effect generation.
+  batch_motif_rules_A/B : dict or None
+      {batch_id: {motif: direction}} for batch effect generation per glycome.
+  coupling_strength : float
+      Magnitude of cross-class coupling injection. 0 = fully independent glycomes
+      with shared sample structure only; 1.0 adds one sigma of shared variation.
+      The induced HSIC scales approximately as coupling_strength². Typical useful
+      range is 0–3 for benchmarking HSIC detection sensitivity.
+  n_coupling_components : int
+      Number of independent shared latent dimensions. 1 gives a rank-1 shared
+      structure; higher values spread the coupling across multiple axes.
+  coupling_motif_A/B : dict or None
+      {motif: any} — values ignored; keys used to bias the coupling direction
+      matrix toward glycans matching those motifs. Useful for modelling known
+      biochemical links, e.g. shared fucosylation affecting both N- and O-glycans.
+  coupling_motif_bias : float
+      Weight multiplier for motif-matching glycans in the coupling direction matrix.
+  kappa_mu : float
+      Mean-shift magnitude for batch effects (shared parameter, applied independently
+      to each glycome using its own direction vectors and sigma estimates).
+  var_b : float
+      Variance inflation magnitude for batch effects.
+  affected_fraction : tuple of float
+      (min, max) fraction of glycans affected per batch, drawn per run.
+  positive_prob, overlap_prob : float
+      Passed to define_batch_direction for both glycomes.
+  missing_fraction : float
+      Target fraction of missing values. Applied independently to each glycome
+      so that missing-value patterns are not artificially correlated.
+  mnar_bias : float
+      MNAR intensity bias; higher values make low-abundance glycans more likely
+      to be missing (models MS detection limits).
+  random_seeds : list of int or None
+      One run is produced per seed. Seeds are offset internally (+1000, +2000, etc.)
+      to ensure glycome A and B have independent biological and coupling draws while
+      remaining fully reproducible.
+  output_dir : str
+  verbose : bool
+  save_csv : bool
+
+  Returns
+  -------
+  list of dict, one entry per seed. Each dict contains:
+    Y_A_clean, Y_B_clean : pd.DataFrame, shape (n_glycans × n_samples)
+        Compositional data (% scale) after coupling injection, before batch effects.
+    Y_A_clean_clr, Y_B_clean_clr : pd.DataFrame
+        CLR-transformed equivalent of the above.
+    Y_A_final, Y_B_final : pd.DataFrame
+        CLR data after batch effects and missingness — the analysis-ready output.
+    bio_labels : np.ndarray, shape (n_samples,)
+        0 = healthy, 1 = unhealthy. Identical for A and B.
+    batch_labels : np.ndarray, shape (n_samples,)
+        0-based batch assignments. Identical for A and B.
+    batch_groups : dict {batch_id: [sample_names]}
+    All scalar config parameters and per-run diagnostics (missingness stats).
+  """
+  from glycoforge.sim_coupled import inject_coupling
+  if random_seeds is None:
+    random_seeds = [42]
+  n_samples = n_H + n_U
+  os.makedirs(output_dir, exist_ok=True)
+  # Fixed-seed baseline Dirichlet parameters. Seed 42 for A, 43 for B so the two
+  # glycomes have structurally independent abundance distributions from the start.
+  rng_alpha = np.random.default_rng(42)
+  raw_A = rng_alpha.lognormal(0, 1.0, n_glycans_A)
+  alpha_H_A = raw_A / np.mean(raw_A) * 10
+  rng_alpha_B = np.random.default_rng(43)
+  raw_B = rng_alpha_B.lognormal(0, 1.0, n_glycans_B)
+  alpha_H_B = raw_B / np.mean(raw_B) * 10
+  # Batch direction vectors are generated once (u_dict_seed fixed) so the batch
+  # structure is identical across runs; only the biological and coupling draws vary.
+  # Seeds 42 and 43 again keep A and B independent.
+  u_dict_A, _ = define_batch_direction(
+    n_glycans=n_glycans_A, n_batches=n_batches,
+    affected_fraction=affected_fraction, positive_prob=positive_prob,
+    overlap_prob=overlap_prob, u_dict_seed=42,
+    glycan_sequences=glycan_sequences_A, batch_motif_rules=batch_motif_rules_A,
+    verbose=verbose
+  )
+  u_dict_B, _ = define_batch_direction(
+    n_glycans=n_glycans_B, n_batches=n_batches,
+    affected_fraction=affected_fraction, positive_prob=positive_prob,
+    overlap_prob=overlap_prob, u_dict_seed=43,
+    glycan_sequences=glycan_sequences_B, batch_motif_rules=batch_motif_rules_B,
+    verbose=verbose
+  )
+  sample_cols = (
+    [f"healthy_{i+1}" for i in range(n_H)] +
+    [f"unhealthy_{i+1}" for i in range(n_U)]
+  )
+  idx_A = (list(glycan_sequences_A[:n_glycans_A]) if glycan_sequences_A
+           else list(np.arange(1, n_glycans_A + 1)))
+  idx_B = (list(glycan_sequences_B[:n_glycans_B]) if glycan_sequences_B
+           else list(np.arange(1, n_glycans_B + 1)))
+  all_runs = []
+  for run_idx, seed in enumerate(random_seeds):
+    if verbose:
+      print(f"\n{'='*60}")
+      print(f"SIMULATE_PAIRED  run {run_idx+1}/{len(random_seeds)}  (seed={seed})")
+      print(f"{'='*60}")
+    # Generate alpha_U independently per glycome. A uses seed directly; B uses
+    # seed+1000 so their biological effect draws are never correlated by seed reuse.
+    alpha_U_A, _ = generate_alpha_U(
+      alpha_H_A, up_frac=up_frac_A, down_frac=down_frac_A,
+      glycan_sequences=glycan_sequences_A, motif_rules=motif_rules_A,
+      motif_bias=motif_bias_A, seed=seed, verbose=verbose
+    )
+    alpha_U_B, _ = generate_alpha_U(
+      alpha_H_B, up_frac=up_frac_B, down_frac=down_frac_B,
+      glycan_sequences=glycan_sequences_B, motif_rules=motif_rules_B,
+      motif_bias=motif_bias_B, seed=seed + 1000, verbose=verbose
+    )
+    # Simulate clean compositional data: (n_samples × n_glycans)
+    P_A, bio_labels = simulate_clean_data(
+      alpha_H_A, alpha_U_A, n_H, n_U, seed=seed, verbose=verbose
+    )
+    # seed+1 for B so that even without coupling the two Dirichlet draws are
+    # independent; using the same seed would create spurious correlation from
+    # the random number stream inside simulate_clean_data.
+    P_B, _ = simulate_clean_data(
+      alpha_H_B, alpha_U_B, n_H, n_U, seed=seed + 1, verbose=verbose
+    )
+    Y_A_clr = clr(P_A)   # (n_samples × n_glycans_A)
+    Y_B_clr = clr(P_B)
+    # ── Optional coupling injection ────────────────────────────────────────
+    # seed+2000 for the latent Z draw so it is independent of all bio and
+    # alpha_U draws. The round-trip through invclr after injection restores
+    # the simplex constraint.
+    coupling_meta = {}
+    if coupling_strength > 0:
+      Y_A_clr, Y_B_clr, Z = inject_coupling(
+        Y_A_clr, Y_B_clr,
+        coupling_strength=coupling_strength,
+        n_coupling_components=n_coupling_components,
+        coupling_motif_A=coupling_motif_A,
+        coupling_motif_B=coupling_motif_B,
+        coupling_motif_bias=coupling_motif_bias,
+        glycan_sequences_A=glycan_sequences_A,
+        glycan_sequences_B=glycan_sequences_B,
+        seed=seed + 2000,
+        verbose=verbose
+      )
+      coupling_meta['Z_shape'] = list(Z.shape)
+      coupling_meta['Z_std'] = float(Z.std())
+    # Round-trip to simplex to restore compositional validity after injection
+    P_A_post = np.array([invclr(Y_A_clr[i], to_percent=True) for i in range(n_samples)])
+    P_B_post = np.array([invclr(Y_B_clr[i], to_percent=True) for i in range(n_samples)])
+    # Recompute CLR from round-tripped compositions for strict internal consistency
+    Y_A_clr_clean = clr(P_A_post)
+    Y_B_clr_clean = clr(P_B_post)
+    # Convert to (glycans × samples) DataFrames matching pipeline convention
+    Y_A_clean = pd.DataFrame(P_A_post.T, index=idx_A, columns=sample_cols)
+    Y_B_clean = pd.DataFrame(P_B_post.T, index=idx_B, columns=sample_cols)
+    Y_A_clean_clr = pd.DataFrame(Y_A_clr_clean.T, index=idx_A, columns=sample_cols)
+    Y_B_clean_clr = pd.DataFrame(Y_B_clr_clean.T, index=idx_B, columns=sample_cols)
+    if save_csv:
+      Y_A_clean.to_csv(f"{output_dir}/A_1_clean_seed{seed}.csv", float_format="%.32f")
+      Y_B_clean.to_csv(f"{output_dir}/B_1_clean_seed{seed}.csv", float_format="%.32f")
+      Y_A_clean_clr.to_csv(f"{output_dir}/A_1_clean_clr_seed{seed}.csv", float_format="%.32f")
+      Y_B_clean_clr.to_csv(f"{output_dir}/B_1_clean_clr_seed{seed}.csv", float_format="%.32f")
+    # ── Shared batch labels, independent effect directions ─────────────────
+    # stratified_batches_from_columns uses sample names to stratify by bio group,
+    # so both glycomes get the same assignments from the same sample_cols.
+    batch_groups, batch_labels = stratified_batches_from_columns(
+      sample_cols, n_batches=n_batches, seed=seed, verbose=verbose
+    )
+    sigma_A = estimate_sigma(Y_A_clean_clr)
+    sigma_B = estimate_sigma(Y_B_clean_clr)
+    # apply_batch_effect expects (n_samples × n_glycans); .T.values transposes
+    Y_A_batch_clr_T, Y_A_batch_T = apply_batch_effect(
+      Y_clean=Y_A_clean_clr.T.values, batch_labels=batch_labels,
+      u_dict=u_dict_A, sigma=sigma_A, kappa_mu=kappa_mu, var_b=var_b, seed=seed,
+      batch_motif_rules=batch_motif_rules_A, glycan_sequences=glycan_sequences_A
+    )
+    Y_B_batch_clr_T, Y_B_batch_T = apply_batch_effect(
+      Y_clean=Y_B_clean_clr.T.values, batch_labels=batch_labels,
+      u_dict=u_dict_B, sigma=sigma_B, kappa_mu=kappa_mu, var_b=var_b, seed=seed,
+      batch_motif_rules=batch_motif_rules_B, glycan_sequences=glycan_sequences_B
+    )
+    # Back to (glycans × samples) DataFrames
+    Y_A_batch_clr = pd.DataFrame(Y_A_batch_clr_T.T, index=idx_A, columns=sample_cols)
+    Y_B_batch_clr = pd.DataFrame(Y_B_batch_clr_T.T, index=idx_B, columns=sample_cols)
+    Y_A_batch = pd.DataFrame(Y_A_batch_T.T, index=idx_A, columns=sample_cols)
+    Y_B_batch = pd.DataFrame(Y_B_batch_T.T, index=idx_B, columns=sample_cols)
+    if save_csv:
+      Y_A_batch.to_csv(f"{output_dir}/A_2_batch_seed{seed}.csv", float_format="%.32f")
+      Y_B_batch.to_csv(f"{output_dir}/B_2_batch_seed{seed}.csv", float_format="%.32f")
+      Y_A_batch_clr.to_csv(f"{output_dir}/A_2_batch_clr_seed{seed}.csv", float_format="%.32f")
+      Y_B_batch_clr.to_csv(f"{output_dir}/B_2_batch_clr_seed{seed}.csv", float_format="%.32f")
+    # ── Missingness applied independently per glycome ──────────────────────
+    # seed+1 for B so that each glycome's missing-value pattern is drawn from
+    # an independent stream; using the same seed would make missingness trivially
+    # correlated across classes (the same glycans absent in both datasets).
+    Y_A_missing, Y_A_missing_clr, _, diag_A = apply_mnar_missingness(
+      Y_A_batch, missing_fraction=missing_fraction,
+      mnar_bias=mnar_bias, seed=seed, verbose=verbose
+    )
+    Y_B_missing, Y_B_missing_clr, _, diag_B = apply_mnar_missingness(
+      Y_B_batch, missing_fraction=missing_fraction,
+      mnar_bias=mnar_bias, seed=seed + 1, verbose=verbose
+    )
+    if missing_fraction > 0 and save_csv:
+      Y_A_missing.to_csv(f"{output_dir}/A_3_missing_seed{seed}.csv", float_format="%.32f")
+      Y_B_missing.to_csv(f"{output_dir}/B_3_missing_seed{seed}.csv", float_format="%.32f")
+    Y_A_final = Y_A_missing_clr if missing_fraction > 0 else Y_A_batch_clr
+    Y_B_final = Y_B_missing_clr if missing_fraction > 0 else Y_B_batch_clr
+    run_meta = {
+      'seed': seed,
+      'n_H': n_H,
+      'n_U': n_U,
+      'n_glycans_A': n_glycans_A,
+      'n_glycans_B': n_glycans_B,
+      'coupling_strength': coupling_strength,
+      'n_coupling_components': n_coupling_components,
+      'coupling_meta': coupling_meta,
+      'n_batches': n_batches,
+      'kappa_mu': kappa_mu,
+      'var_b': var_b,
+      'missing_fraction': missing_fraction,
+      'mnar_bias': mnar_bias,
+      'bio_labels': bio_labels.tolist(),
+      'batch_labels': batch_labels.tolist(),
+      'batch_groups': {k: list(v) for k, v in batch_groups.items()},
+      'missingness_A': diag_A,
+      'missingness_B': diag_B,
+    }
+    with open(f"{output_dir}/metadata_seed{seed}.json", 'w') as f:
+      json.dump(run_meta, f, indent=2)
+    if verbose:
+      print(f"\nRun {run_idx+1} complete — outputs in {output_dir}")
+      print("=" * 60)
+    all_runs.append({
+      **run_meta,
+      'Y_A_clean': Y_A_clean,
+      'Y_A_clean_clr': Y_A_clean_clr,
+      'Y_B_clean': Y_B_clean,
+      'Y_B_clean_clr': Y_B_clean_clr,
+      'Y_A_final': Y_A_final,
+      'Y_B_final': Y_B_final,
+    })
+  return all_runs
