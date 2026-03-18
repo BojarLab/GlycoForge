@@ -281,8 +281,8 @@ def test_motif_based_alpha_generation():
     # Validation 1: Array dimensions are correct
     assert len(alpha_U_with_motif) == len(glycan_sequences)
     assert len(alpha_U_no_motif) == len(glycan_sequences)
-    
-# Validation 2: Motif bias affects the distribution
+
+    # Validation 2: Motif bias affects the distribution
     # With motif rules, the distribution should differ from no-motif case
     # Test that motif_bias has an effect (not testing specific direction due to pairing complexity)
     ratio_with_motif = alpha_U_with_motif / alpha_H
@@ -635,4 +635,99 @@ def test_mnar_edge_cases():
     )
     assert np.array_equal(mask_a, mask_b)
     assert np.array_equal(np.isnan(Y_missing_a), np.isnan(Y_missing_b))
+
+
+# --- Coupling tests ---
+
+def _hsic_linear(X, Y):
+    """Linear HSIC statistic between two sample-space matrices."""
+    n = X.shape[0]
+    H = np.eye(n) - np.ones((n, n)) / n
+    Kc = H @ (X @ X.T) @ H
+    Lc = H @ (Y @ Y.T) @ H
+    return np.trace(Kc @ Lc) / (n - 1) ** 2
+
+
+def _hsic_permtest(X, Y, n_perm=300, seed=0):
+    """Return (hsic_obs, p_value) via permutation test."""
+    rng = np.random.default_rng(seed)
+    obs = _hsic_linear(X, Y)
+    count = sum(
+        _hsic_linear(X, Y[rng.permutation(len(Y))]) >= obs
+        for _ in range(n_perm)
+    )
+    return obs, count / n_perm
+
+
+def test_zero_coupling_independence():
+    """coupling_strength=0: cross-glycome HSIC should be non-significant.
+
+    Note: shared bio/batch labels still cause a tiny amount of common variance,
+    so we cannot assert exact zero — we assert that HSIC is not statistically
+    significant at alpha=0.05 via a permutation test.
+    """
+    from glycoforge.sim_coupled import inject_coupling
+
+    rng_a = np.random.default_rng(7)
+    rng_b = np.random.default_rng(13)
+    n_samples, n_glycans = 60, 15
+    Y_A = rng_a.standard_normal((n_samples, n_glycans))
+    Y_B = rng_b.standard_normal((n_samples, n_glycans))
+
+    inject_coupling(
+        Y_A, Y_B,
+        coupling_strength=0.0,
+        n_coupling_components=2,
+        coupling_motif_A=None, coupling_motif_B=None,
+        coupling_motif_bias=0.0,
+        glycan_sequences_A=None, glycan_sequences_B=None,
+        seed=42,
+    )
+
+    _, p_value = _hsic_permtest(Y_A, Y_B, n_perm=300, seed=0)
+    assert p_value >= 0.05, (
+        f"Expected non-significant HSIC for zero coupling, got p={p_value:.4f}"
+    )
+
+
+def test_nonzero_coupling_detectability():
+    """coupling_strength=1.0: cross-glycome HSIC should be statistically significant."""
+    from glycoforge.sim_coupled import inject_coupling
+
+    rng_a = np.random.default_rng(7)
+    rng_b = np.random.default_rng(13)
+    n_samples, n_glycans = 60, 15
+    Y_A = rng_a.standard_normal((n_samples, n_glycans))
+    Y_B = rng_b.standard_normal((n_samples, n_glycans))
+
+    inject_coupling(
+        Y_A, Y_B,
+        coupling_strength=1.0,
+        n_coupling_components=2,
+        coupling_motif_A=None, coupling_motif_B=None,
+        coupling_motif_bias=0.0,
+        glycan_sequences_A=None, glycan_sequences_B=None,
+        seed=42,
+    )
+
+    _, p_value = _hsic_permtest(Y_A, Y_B, n_perm=300, seed=0)
+    assert p_value < 0.05, (
+        f"Expected significant HSIC for coupling_strength=1.0, got p={p_value:.4f}"
+    )
+
+
+def test_coupling_direction_unit_norm():
+    """_build_coupling_directions columns should each have norm = 1.0."""
+    from glycoforge.sim_coupled import _build_coupling_directions
+
+    for n_glycans, n_components in [(10, 1), (20, 3), (5, 5)]:
+        U = _build_coupling_directions(
+            n_glycans, n_components,
+            motif_rules=None, glycan_sequences=None,
+            motif_bias=0.0, seed=42,
+        )
+        norms = np.linalg.norm(U, axis=0)
+        assert np.allclose(norms, 1.0, atol=1e-10), (
+            f"Column norms should be 1.0, got {norms}"
+        )
 
