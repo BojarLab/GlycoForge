@@ -651,12 +651,32 @@ def _hsic_linear(X, Y):
 def _hsic_permtest(X, Y, n_perm=300, seed=0):
     """Return (hsic_obs, p_value) via permutation test."""
     rng = np.random.default_rng(seed)
-    obs = _hsic_linear(X, Y)
-    count = sum(
-        _hsic_linear(X, Y[rng.permutation(len(Y))]) >= obs
-        for _ in range(n_perm)
-    )
-    return obs, count / n_perm
+
+    # Precompute centering matrix and centered kernel for X (fixed across permutations)
+    n = X.shape[0]
+    H = np.eye(n) - np.ones((n, n)) / n
+    Kx = X @ X.T
+    Kc = H @ Kx @ H
+
+    # Observed HSIC with original Y
+    Ly = Y @ Y.T
+    Lc = H @ Ly @ H
+    obs = np.trace(Kc @ Lc) / (n - 1) ** 2
+
+    # Permutation distribution: reuse Kc and H; only Y changes
+    count = 0
+    for _ in range(n_perm):
+        perm = rng.permutation(n)
+        Y_perm = Y[perm]
+        Ly_perm = Y_perm @ Y_perm.T
+        Lc_perm = H @ Ly_perm @ H
+        hsic_perm = np.trace(Kc @ Lc_perm) / (n - 1) ** 2
+        if hsic_perm >= obs:
+            count += 1
+
+    # Use (count + 1) / (n_perm + 1) to include the observed statistic
+    # and avoid zero/one p-values with finite permutations.
+    return obs, (count + 1) / (n_perm + 1)
 
 
 def test_zero_coupling_independence():
