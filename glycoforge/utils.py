@@ -8,6 +8,7 @@ import os
 import re
 from sklearn.decomposition import PCA
 from scipy.stats import f_oneway, shapiro, kruskal
+from scipy.optimize import brentq
 from glycowork.motif.graph import subgraph_isomorphism
 
 
@@ -617,31 +618,25 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=1.0,
     Y = Y_compositional.values if is_df else Y_compositional
     n_samples, n_glycans = Y.shape
     missing_mask = np.zeros_like(Y, dtype=bool)
-    # Phase 1: Per-sample intensity-dependent probability
+    # MNAR missingness via logistic in log-abundance space.
+    # For each sample i, the per-glycan missing probability is:
+    #   p(missing | x_ij) = 1 / (1 + exp(a_i + b * log(x_ij)))
+    # where b = mnar_bias controls the steepness of the intensity-detection
+    # relationship, and a_i is a per-sample intercept solved numerically so
+    # that mean_j(p_ij) = missing_fraction exactly.
     for i in range(n_samples):
-        sample_values = Y[i, :]
-        max_val = np.max(sample_values)
-        if max_val > 0:
-            normalized_intensity = sample_values / max_val
-        else:
-            normalized_intensity = np.ones(n_glycans) * 0.5
-        prob_missing = (1 - normalized_intensity) ** mnar_bias
+        log_x = np.log(np.maximum(Y[i, :], 1e-10))
+        # Find a_i such that mean(1 / (1 + exp(a + b*log_x))) = missing_fraction.
+        def mean_missing(a):
+            return np.mean(1.0 / (1.0 + np.exp(a + mnar_bias * log_x))) - missing_fraction
+        # Bracket: large negative a → all missing (mean≈1), large positive → none missing (mean≈0)
+        try:
+            a_i = brentq(mean_missing, -50, 50, xtol = 1e-6)
+        except ValueError:
+            # Fallback if target is outside achievable range for this sample
+            a_i = 0.0
+        prob_missing = 1.0 / (1.0 + np.exp(a_i + mnar_bias * log_x))
         missing_mask[i, :] = rng.random(n_glycans) < prob_missing
-    # Phase 2: Global adjustment to target fraction
-    target_count = int(missing_fraction * Y.size)
-    current_count = np.sum(missing_mask)
-    if current_count < target_count:
-        available = np.where(~missing_mask)
-        n_add = target_count - current_count
-        if n_add > 0 and len(available[0]) > 0:
-            add_indices = rng.choice(len(available[0]), min(n_add, len(available[0])), replace=False)
-            missing_mask[available[0][add_indices], available[1][add_indices]] = True
-    elif current_count > target_count:
-        missing_indices = np.where(missing_mask)
-        n_remove = current_count - target_count
-        if n_remove > 0:
-            remove_indices = rng.choice(len(missing_indices[0]), n_remove, replace=False)
-            missing_mask[missing_indices[0][remove_indices], missing_indices[1][remove_indices]] = False
     # Apply missingness
     Y_missing = Y.copy().astype(float)
     Y_missing[missing_mask] = np.nan
