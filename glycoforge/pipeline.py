@@ -6,6 +6,7 @@ import json
 import warnings
 import contextlib
 import io
+from sklearn.covariance import LedoitWolf
 from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_dirichlet_params_from_real_data, define_differential_mask
 from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
 from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness
@@ -313,6 +314,15 @@ def simulate(
                 print(f"[Real Data] Actual n_glycans from data: {n_glycans}")
                 print(f"[Real Data] alpha_H: [{alpha_H.min():.3f}, {alpha_H.max():.3f}]")
                 print(f"[Real Data] alpha_U: [{alpha_U_base.min():.3f}, {alpha_U_base.max():.3f}]")
+            # Compute MVN sampler parameters once (reused across all seeds).
+            # We use Ledoit-Wolf shrinkage because n_samples << n_glycans is typical in glycomics,
+            # making the raw sample covariance rank-deficient and numerically unusable.
+            _clr_H_real = clr(df_processed[r7_cols].values.T)  # (n_H, n_glycans)
+            _clr_U_real = clr(df_processed[bm_cols].values.T)  # (n_U, n_glycans)
+            _clr_all_real = np.vstack([_clr_H_real, _clr_U_real])
+            Sigma_mvn = LedoitWolf().fit(_clr_all_real).covariance_  # shrunk pooled covariance
+            if verbose:
+                print(f"[Copula] Ledoit-Wolf covariance estimated from {_clr_all_real.shape[0]} samples × {n_glycans} features")
         else:
             # Still need to match real data size even if not using real effect sizes
             n_glycans = n_glycans_real
