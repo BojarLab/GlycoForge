@@ -578,7 +578,7 @@ def check_bio_effect(data_clr, bio_labels, stage_name="", verbose=True):
     }, pc
 
 
-def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0, seed=42, verbose=True):
+def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=1.0, seed=42, verbose=True):
     """Apply missing-not-at-random (MNAR) pattern to compositional data.
     Low-intensity glycans have higher probability of being missing.
     Parameters:
@@ -589,7 +589,7 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=2.0,
         Target fraction of missing values (0.0 to 1.0)
     mnar_bias : float
         Intensity bias parameter. Higher values = stronger bias toward low intensity.
-        Typical range: 0.5 (weak) to 5.0 (very strong). Default 2.0.
+        Typical range: 0.5 (weak) to 5.0 (very strong). Default 1.0.
     seed : int
         Random seed for reproducibility
     verbose : bool

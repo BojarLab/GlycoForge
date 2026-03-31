@@ -34,7 +34,7 @@ def simulate(
     baseline_method="median",
     u_dict=None,
     missing_fraction=0.0,
-    mnar_bias=2.0,
+    mnar_bias=1.0,
     glycan_sequences=None,
     motif_rules=None,
     motif_bias=0.8,
@@ -694,7 +694,7 @@ def simulate_paired(
   # Applied independently per glycome (different random seeds) so that the
   # missing-value patterns are not artificially correlated.
   missing_fraction=0.0,
-  mnar_bias=2.0,
+  mnar_bias=1.0,
   # ── Meta ───────────────────────────────────────────────────────────────────
   random_seeds=None,
   output_dir="results/paired/",
