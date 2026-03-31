@@ -1,8 +1,8 @@
 import numpy as np
 from glycoforge.utils import clr, invclr, find_compositional_pairs
 from scipy.stats import dirichlet
+from scipy.stats import norm as sp_norm
 from glycowork.motif.graph import subgraph_isomorphism
-
 
 def create_bio_groups(data, prefix_mapping):
     bio_groups = {}
@@ -343,25 +343,82 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
     return alpha_H, alpha_U, debug_info
 
 
-def simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed=None, verbose=True):
-    """
-    Simulate clean glycomics data from Dirichlet distributions.
-    """
-    rng = np.random.default_rng(seed)
+def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
+                        seed=None, verbose=False,
+                        real_clr_ref=None, Sigma_lw=None):
+  """Simulate clean glycomics data.
+  If real_clr_ref and Sigma_lw are provided, uses a Gaussian copula: LW correlation
+  matrix defines inter-feature dependencies, empirical marginals from real_clr_ref
+  define per-feature distributions, and the CLR-space injection from alpha_H/alpha_U
+  (extracted via define_dirichlet_params_from_real_data) shifts the unhealthy mean.
+  This gives strictly better marginal realism (KS) than MVN while preserving correlation
+  structure (Mantel r) comparable to Ledoit-Wolf MVN sampling.
+  Falls back to Dirichlet sampling when real_clr_ref/Sigma_lw are not provided
+  (simulated-mode, no real data available).
+  Parameters
+  ----------
+  alpha_H, alpha_U : (n_glycans,) Dirichlet concentration params for Dirichlet fallback
+      AND source of CLR-space injection mu_U - mu_H for copula mode.
+  n_H, n_U : int
+  seed : int or None
+  verbose : bool
+  real_clr_ref : (n_samples, n_glycans) ndarray or None
+      Pooled real CLR data used to build empirical marginals. Should include both groups.
+  Sigma_lw : (n_glycans, n_glycans) ndarray or None
+      Ledoit-Wolf covariance from the same real data. Derive correlation matrix R
+      by normalising by marginal stds.
+  Returns
+  -------
+  P : (n_H + n_U, n_glycans) percent-scale compositional data
+  labels : (n_H + n_U,) int, 0 = healthy, 1 = unhealthy
+  """
+  rng = np.random.default_rng(seed)
+  n_glycans = len(alpha_H)
+  labels = np.array([0] * n_H + [1] * n_U)
+  if real_clr_ref is None or Sigma_lw is None:
+    # ── Dirichlet fallback (synthetic mode) ──────────────────────────────────
     healthy_samples = dirichlet.rvs(alpha_H, size=n_H, random_state=rng) * 100
     unhealthy_samples = dirichlet.rvs(alpha_U, size=n_U, random_state=rng) * 100
-    P = np.vstack([healthy_samples, unhealthy_samples])   # shape (n_H+n_U, n_glycans)
+    P = np.vstack([healthy_samples, unhealthy_samples])
     if verbose:
-        print("=" * 60)
-        print("SIMULATE_CLEAN_DATA")
-        print("=" * 60)
-        print(f"Simulated data Y_clean shape: {P.shape}")
-        print(f"Min value: {P.min():.2e}")
-        print(f"Max value: {P.max():.2f}")
-        print(f"Zero values: {(P == 0).sum()}")
-        print("=" * 60)
-    labels = np.array([0]*n_H + [1]*n_U)                  # 0=healthy, 1=unhealthy
+      print(f"simulate_clean_data [Dirichlet]: shape={P.shape}, min={P.min():.2e}, max={P.max():.2f}")
     return P, labels
+  # ── Gaussian copula mode (templated mode) ──────────────────────────────
+  # Step 1: Derive correlation matrix from LW covariance
+  std = np.sqrt(np.diag(Sigma_lw))
+  std = np.where(std < 1e-10, 1.0, std)
+  R = Sigma_lw / np.outer(std, std)
+  np.fill_diagonal(R, 1.0)
+  eps = max(1e-8, 1e-4 * n_glycans)
+  R_reg = R + eps * np.eye(n_glycans)
+  # Step 2: Sample Z ~ N(0, R) — preserves LW inter-feature correlation structure
+  Z = rng.multivariate_normal(np.zeros(n_glycans), R_reg, size=n_H + n_U)
+  # Step 3: Probability integral transform to uniform marginals
+  U = sp_norm.cdf(Z)                                   # (n_H+n_U, n_glycans)
+  # Step 4: Map uniforms to real CLR empirical marginals via linear interpolation
+  n_real = real_clr_ref.shape[0]
+  sorted_real = np.sort(real_clr_ref, axis=0)          # (n_real, n_glycans)
+  frac_idx = U * (n_real - 1)
+  lo = np.floor(frac_idx).astype(int)
+  hi = np.minimum(lo + 1, n_real - 1)
+  t = frac_idx - lo
+  X = (sorted_real[lo, np.arange(n_glycans)] * (1 - t)
+       + sorted_real[hi, np.arange(n_glycans)] * t)    # (n_H+n_U, n_glycans)
+  # Step 5: Apply CLR-space bio injection to unhealthy rows.
+  # mu_H is the healthy CLR mean; mu_U = mu_H + injection from define_dirichlet_params.
+  # We recover injection from alpha_H/alpha_U via the same CLR transform used in
+  # define_dirichlet_params_from_real_data (p proportional to alpha, then CLR).
+  p_H = alpha_H / alpha_H.sum()
+  p_U = alpha_U / alpha_U.sum()
+  injection = clr(p_U) - clr(p_H)
+  X[n_H:] += injection
+  # Step 6: Softmax back to percent-scale compositions
+  shifted = X - X.max(axis=1, keepdims=True)
+  exp_v = np.exp(shifted)
+  P = 100.0 * exp_v / exp_v.sum(axis=1, keepdims=True)
+  if verbose:
+    print(f"simulate_clean_data [Copula]: shape={P.shape}, min={P.min():.2e}, max={P.max():.2f}")
+  return P, labels
 
 
 def define_differential_mask(mask_input, n_glycans, effect_sizes=None, significant_mask=None, verbose=False):

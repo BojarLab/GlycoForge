@@ -376,7 +376,11 @@ def simulate(
         if verbose:
             print(f"alpha_U range: [{alpha_U.min():.2f}, {alpha_U.max():.2f}]")
         # Step 3: Generate clean data
-        P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed=seed, verbose=verbose)
+        if use_real_effect_sizes:
+            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
+                                            real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn)
+        else:
+            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose)
         if glycan_sequences is not None:
             glycan_index = glycan_sequences[:n_glycans]
             index_name = "glycan"
