@@ -21,7 +21,7 @@ python3.10 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```
 
-* Core dependency: `glycowork>=1.7.1`
+* Core dependency: `glycowork>=1.8.0`
 
 ```bash
 pip install glycoforge
