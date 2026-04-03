@@ -41,6 +41,7 @@ def simulate(
     motif_bias=0.8,
     batch_motif_rules=None, # {batch_id: {motif: direction}}
     batch_motif_bias=0.8,
+    batch_mode="additive",
     random_seeds=[42],
     output_dir="results/",
     verbose=False,
@@ -74,6 +75,7 @@ def simulate(
         'baseline_method': baseline_method,
         'missing_fraction': missing_fraction,
         'mnar_bias': mnar_bias,
+        'batch_mode': batch_mode,
         'motif_bias': motif_bias,
         'batch_motif_bias': batch_motif_bias
     }
@@ -449,7 +451,8 @@ def simulate(
             var_b=var_b,
             seed=seed,
             batch_motif_rules=batch_motif_rules if 'batch_motif_rules' in locals() else None,
-            glycan_sequences=glycan_sequences
+            glycan_sequences=glycan_sequences,
+            batch_mode = batch_mode
         )
         Y_with_batch_clr = pd.DataFrame(Y_with_batch_clr_T.T, index=Y_clean_clr.index, columns=Y_clean_clr.columns)
         Y_with_batch = pd.DataFrame(Y_with_batch_T.T, index=Y_clean_clr.index, columns=Y_clean_clr.columns)
@@ -685,6 +688,7 @@ def simulate_paired(
   motif_rules_B=None,
   motif_bias_B=0.8,
   batch_motif_rules_B=None,
+  batch_mode="additive",
   # ── Cross-class coupling (optional) ────────────────────────────────────────
   # At coupling_strength=0 the two glycomes are statistically independent
   # conditioned on the shared sample structure. Increasing it injects shared
@@ -929,12 +933,12 @@ def simulate_paired(
     Y_A_batch_clr_T, Y_A_batch_T = apply_batch_effect(
       Y_clean=Y_A_clean_clr.T.values, batch_labels=batch_labels,
       u_dict=u_dict_A, sigma=sigma_A, kappa_mu=kappa_mu, var_b=var_b, seed=seed,
-      batch_motif_rules=batch_motif_rules_A, glycan_sequences=glycan_sequences_A
+      batch_motif_rules=batch_motif_rules_A, glycan_sequences=glycan_sequences_A, batch_mode=batch_mode
     )
     Y_B_batch_clr_T, Y_B_batch_T = apply_batch_effect(
       Y_clean=Y_B_clean_clr.T.values, batch_labels=batch_labels,
       u_dict=u_dict_B, sigma=sigma_B, kappa_mu=kappa_mu, var_b=var_b, seed=seed,
-      batch_motif_rules=batch_motif_rules_B, glycan_sequences=glycan_sequences_B
+      batch_motif_rules=batch_motif_rules_B, glycan_sequences=glycan_sequences_B, batch_mode=batch_mode
     )
     # Back to (glycans × samples) DataFrames
     Y_A_batch_clr = pd.DataFrame(Y_A_batch_clr_T.T, index=idx_A, columns=sample_cols)

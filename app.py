@@ -196,9 +196,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     var_b=float(var_b),
     missing_fraction=float(missing_fraction),
     mnar_bias=float(mnar_bias),
-    random_seeds=random_seeds,
-    verbose=True,
-    save_csv=True,
+    random_seeds=random_seeds
   )
   if data_source == "simulated":
     params["n_glycans"] = int(n_glycans)

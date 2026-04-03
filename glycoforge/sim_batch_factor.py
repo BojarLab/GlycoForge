@@ -131,6 +131,7 @@ def apply_batch_effect(Y_clean # (samples x glycans) clean CLR matrix
                        , seed=42 # Random generator for reproducibility
                        , batch_motif_rules=None
                        , glycan_sequences=None
+                       , batch_mode="additive" # "additive": constant CLR shift (ComBat-correctable); "multiplicative": shift ∝ current CLR value (non-linear, outside ComBat assumption)
                     ):
     rng = np.random.default_rng(seed)
     Y_with_batch_clr = Y_clean.copy()
@@ -158,7 +159,10 @@ def apply_batch_effect(Y_clean # (samples x glycans) clean CLR matrix
             continue
         u_b = u_dict[b]
         # mean shift term
-        mean_shift = kappa_mu * sigma * u_b
+        if batch_mode == "multiplicative":
+            mean_shift = kappa_mu * u_b * Y_with_batch_clr[i, :]
+        else:
+            mean_shift = kappa_mu * sigma * u_b
         # variance inflation (batch-specific scale)
         if var_b > 0:
             var_scale = batch_var_scales[b]
