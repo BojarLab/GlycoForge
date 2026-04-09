@@ -1,3 +1,4 @@
+from glycowork.glycan_data.loader import glycomics_data_loader as _gcl
 from glycowork.motif.analysis import get_differential_expression
 import numpy as np
 import pandas as pd
@@ -15,6 +16,7 @@ from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bi
 def simulate(
     data_source="simulated",
     data_file=None,
+    glycan_class="N", # only used when data_source = "simulated"
     n_glycans=50,
     n_H=15,
     n_U=15,
@@ -109,6 +111,7 @@ def simulate(
             kwargs = {
                 'data_source': data_source,
                 'data_file': data_file,
+                'glycan_class': glycan_class,
                 'n_glycans': n_glycans,
                 'n_H': n_H,
                 'n_U': n_U,
@@ -170,18 +173,83 @@ def simulate(
     # Step 1: Prepare alpha_H based on data source
     bio_debug_info = None  # Initialize debug info storage
     if data_source == "simulated":
-        rng_alpha = np.random.default_rng(42)  # Fixed seed for reproducible baseline structure
-        raw_alpha = rng_alpha.lognormal(mean=0, sigma=1.0, size=n_glycans)
-        alpha_H = raw_alpha / np.mean(raw_alpha) * 10  # Normalize to maintain mean concentration of 10
+        _all_ds_names = [n for n in dir(_gcl) if not n.startswith('_') and isinstance(getattr(_gcl, n), pd.DataFrame)]
+        _all_ds = []
+        for _n in _all_ds_names:
+            _df = getattr(_gcl, _n).copy()
+            if _n.startswith('time_series'):
+                _seqs = [str(c) for c in _df.columns[1:]]
+                _mat = _df.iloc[:, 1:].apply(pd.to_numeric, errors = 'coerce').T.reset_index(drop = True)
+            else:
+                _seqs = [str(g) for g in _df['glycan'].tolist()] if 'glycan' in _df.columns else []
+                _mat = _df.drop(columns = ['glycan'], errors = 'ignore').select_dtypes(
+                    include = [np.number]).reset_index(drop = True)
+            if not _seqs or _mat.empty:
+                continue
+            _seen, _keep = set(), []
+            for _i, _g in enumerate(_seqs):
+                if _g not in _seen:
+                    _seen.add(_g)
+                    _keep.append(_i)
+            _all_ds.append((_n, [_seqs[i] for i in _keep], _mat.iloc[_keep].reset_index(drop = True)))
+        # Select datasets matching glycan class
+        _class_tag = {'N': '_n_', 'O': '_o_', 'GSL': '_gsl_'}.get(glycan_class)
+        _candidates = [t for t in _all_ds if len(t[1]) >= n_glycans and
+                       (_class_tag is None or _class_tag in t[0].lower())]
+        if not _candidates:
+            _candidates = [t for t in _all_ds if len(t[1]) >= n_glycans]
+        if not _candidates:
+            _candidates = sorted(_all_ds, key = lambda x: -len(x[1]))
+        n_glycans = min(n_glycans, max(len(t[1]) for t in _candidates))
+        _pooled_clr, _pooled_R = [], []
+        for _ds_name, _ds_seqs, _ds_mat in _candidates:
+            _n_avail = len(_ds_seqs)
+            _n_take = min(n_glycans, _n_avail)
+            _top_pos = _ds_mat.mean(axis = 1).nlargest(_n_take).index.tolist()
+            _sub = _ds_mat.iloc[_top_pos].reset_index(drop = True)
+            _sub_vals = _sub.values.T  # (n_samples, n_glycans)
+            _sub_vals = _sub_vals[~np.isnan(_sub_vals).any(axis = 1)]
+            if _sub_vals.shape[0] < 2:
+                continue
+            _clr_i = clr(_sub_vals)
+            if _clr_i.shape[1] < n_glycans:
+                continue  # skip datasets that can't provide enough glycans after dedup
+            _lw_i = LedoitWolf().fit(_clr_i).covariance_
+            _std_i = np.sqrt(np.diag(_lw_i))
+            _std_i = np.where(_std_i < 1e-10, 1.0, _std_i)
+            _R_i = _lw_i / np.outer(_std_i, _std_i)
+            np.fill_diagonal(_R_i, 1.0)
+            _pooled_R.append(_R_i)
+            _pooled_clr.append(_clr_i)
+        _R_consensus = np.mean(_pooled_R, axis = 0)
+        np.fill_diagonal(_R_consensus, 1.0)
+        _clr_all_syn = np.vstack(_pooled_clr)
+        # Reconstruct a usable Sigma_syn from consensus R and pooled marginal stds
+        _pooled_std = np.std(_clr_all_syn, axis = 0)
+        _pooled_std = np.where(_pooled_std < 1e-10, 1.0, _pooled_std)
+        _Sigma_syn = _R_consensus * np.outer(_pooled_std, _pooled_std)
+        # Build alpha_H from pooled mean abundance profile
+        _p_h_syn = np.maximum(np.mean(np.vstack([
+            _ds_mat.iloc[_ds_mat.mean(axis = 1).nlargest(n_glycans).index].mean(axis = 1).values
+            for _, _, _ds_mat in _candidates if _ds_mat.mean(axis = 1).nlargest(n_glycans).shape[0] == n_glycans
+        ]), axis = 0), 1e-6)
+        _p_h_syn /= _p_h_syn.sum()
+        alpha_H = _p_h_syn * 10 * n_glycans
+        if glycan_sequences is None:
+            _rep_name, _rep_seqs, _rep_mat = max(_candidates, key = lambda t: len(t[1]))
+            _top_pos = _rep_mat.mean(axis = 1).nlargest(n_glycans).index.tolist()
+            glycan_sequences = [_rep_seqs[i] for i in _top_pos]
         real_effect_sizes = None
-        alpha_U_base = None  # Will generate synthetically in loop
-        if motif_rules is not None and glycan_sequences is None:
-            from glycowork.motif.tokenization import get_random_glycan
-            glycan_sequences = get_random_glycan(n = n_glycans, glycan_class = 'O')
-            if verbose:
-                print(f"[Simulated] motif_rules provided without glycan_sequences; sampled {n_glycans} random O-glycans")
+        alpha_U_base = None
+        if verbose:
+            print(
+                f"[Synthetic] Pooled covariance from {len(_pooled_R)} datasets ({n_glycans} glycans each, {_clr_all_syn.shape[0]} total samples)")
+            if _class_tag:
+                print(f"[Synthetic] Glycan class filter: {_class_tag}")
     elif data_source == "real":
         df = load_data_from_glycowork(data_file)
+        if glycan_sequences is None and 'glycan' in df.columns:
+            glycan_sequences = df['glycan'].tolist()
         # Get column prefixes (with defaults)
         if column_prefix is None:
             column_prefix = {}
@@ -390,9 +458,13 @@ def simulate(
         # Step 3: Generate clean data
         if use_real_effect_sizes:
             P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
-                                            real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn)
+                                            real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn, injection = np.array(bio_debug_info['injection']))
         else:
-            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose)
+            _p_H_syn = alpha_H / alpha_H.sum()
+            _p_U_syn = alpha_U / alpha_U.sum()
+            _injection_syn = (clr(_p_U_syn) - clr(_p_H_syn)) * bio_strength
+            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
+                                            real_clr_ref = _clr_all_syn, Sigma_lw = _Sigma_syn, injection = _injection_syn)
         if glycan_sequences is not None:
             glycan_index = glycan_sequences[:n_glycans]
             index_name = "glycan"

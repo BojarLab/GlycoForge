@@ -345,7 +345,7 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
 
 def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
                         seed=None, verbose=False,
-                        real_clr_ref=None, Sigma_lw=None):
+                        real_clr_ref=None, Sigma_lw=None, injection=None):
   """Simulate clean glycomics data.
   If real_clr_ref and Sigma_lw are provided, uses a Gaussian copula: LW correlation
   matrix defines inter-feature dependencies, empirical marginals from real_clr_ref
@@ -408,9 +408,10 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   # mu_H is the healthy CLR mean; mu_U = mu_H + injection from define_dirichlet_params.
   # We recover injection from alpha_H/alpha_U via the same CLR transform used in
   # define_dirichlet_params_from_real_data (p proportional to alpha, then CLR).
-  p_H = alpha_H / alpha_H.sum()
-  p_U = alpha_U / alpha_U.sum()
-  injection = clr(p_U) - clr(p_H)
+  if injection is None:
+      p_H = alpha_H / alpha_H.sum()
+      p_U = alpha_U / alpha_U.sum()
+      injection = clr(p_U) - clr(p_H)
   X[n_H:] += injection
   # Step 6: Softmax back to percent-scale compositions
   shifted = X - X.max(axis=1, keepdims=True)
