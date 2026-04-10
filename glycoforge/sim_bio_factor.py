@@ -1,6 +1,5 @@
 import numpy as np
 from glycoforge.utils import clr, invclr, find_compositional_pairs
-from scipy.stats import dirichlet
 from scipy.stats import norm as sp_norm
 from glycowork.motif.graph import subgraph_isomorphism
 
@@ -211,25 +210,23 @@ def robust_effect_size_processing(effect_sizes,
 
 
 
-def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy distribution (proportions, should sum to ~1).
-                                           effect_sizes, # array-like Cohen's d effect sizes from differential expression analysis.
-                                           differential_mask, # array-like Binary mask (0 or 1) indicating which glycans are significantly differential.
-                                           bio_strength=1.0, # float Biological effect scaling parameter 'lambda'.
-                                           k_dir=100, # float Dirichlet concentration parameter for Healthy group.
-                                           variance_ratio=1.0, # float Unhealthy variance / Healthy variance.
-                                           winsorize_percentile=None, # float or None Percentile for Winsorization (auto if None).
-                                           baseline_method="median", # str Baseline calculation method: "median", "mad", or "p75".
-                                           min_alpha=0.5, # float Minimum alpha value to avoid zero parameters.
-                                           max_alpha=None, # float or None Maximum alpha value to prevent extreme concentrations.
-                                           verbose=True):
-    """Generate Dirichlet parameters using real effect sizes via CLR-space injection.
-    -----------
-    variance_ratio : float, default=1.0
-        Ratio of Unhealthy variance to Healthy variance.
-        - variance_ratio = 1.0: Equal variance (conservative)
-        - variance_ratio = 1.5: Unhealthy 50% more variable (default)
-        - variance_ratio = 2.0: Unhealthy 2× more variable (severe disease)
-        - variance_ratio > 3.0: Extreme (use with caution)
+def define_bio_injection_from_real_data(p_h, # array-like Baseline healthy distribution (proportions, should sum to ~1).
+                                        effect_sizes, # array-like Cohen's d effect sizes from differential expression analysis.
+                                        differential_mask, # array-like Binary mask (0 or 1) indicating which glycans are significantly differential.
+                                        bio_strength=1.0, # float Biological effect scaling parameter 'lambda'.
+                                        k_dir=100, # float Concentration scalar controlling alpha magnitude; higher = tighter distributions.
+                                        variance_ratio=1.0, # float Unhealthy variance / Healthy variance.
+                                        winsorize_percentile=None, # float or None Percentile for Winsorization (auto if None).
+                                        baseline_method="median", # str Baseline calculation method: "median", "mad", or "p75".
+                                        min_alpha=0.5, # float Minimum alpha value to avoid zero parameters.
+                                        max_alpha=None, # float or None Maximum alpha value to prevent extreme concentrations.
+                                        verbose=True):
+    """Compute CLR-space bio injection and scaled mean proportion vectors from real effect sizes.
+    Winsorizes and normalizes effect sizes, injects them into CLR space relative to the
+    healthy baseline, and returns scaled proportion vectors (alpha_H, alpha_U) whose ratio
+    encodes the biological signal.
+    variance_ratio controls the relative concentration: k_dir_U = k_dir / variance_ratio,
+    so higher values make the unhealthy group more dispersed around its mean.
     """
     p_h = np.asarray(p_h, dtype=float)
     effect_sizes = np.asarray(effect_sizes, dtype=float)
@@ -258,7 +255,7 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
                 # Fallback: use detection limit
                 p_h[i] = 0.001
         if verbose:
-            print(f"[define_dirichlet_params_from_real_data] Imputed {zero_mask.sum()} zero values in p_h")
+            print(f"[define_bio_injection_from_real_data] Imputed {zero_mask.sum()} zero values in p_h")
     # Step 1: Normalize p_h to sum = 1
     p_h = p_h / np.sum(p_h)
     # Step 2: Transform to CLR space
@@ -273,9 +270,12 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
         verbose=verbose
     )
     if verbose:
-        print(f"[define_dirichlet_params_from_real_data] Raw effect sizes: mean={np.mean(effect_sizes):.3f}, std={np.std(effect_sizes):.3f}, range=[{np.min(effect_sizes):.3f}, {np.max(effect_sizes):.3f}]")
-        print(f"[define_dirichlet_params_from_real_data] Robust effect sizes (normalized): mean={np.mean(d_robust):.3f}, std={np.std(d_robust):.3f}, range=[{np.min(d_robust):.3f}, {np.max(d_robust):.3f}]")
-        print(f"[define_dirichlet_params_from_real_data] Differential mask: {int(differential_mask.sum())}/{len(differential_mask)} glycans are significant")
+        print(
+            f"[define_bio_injection_from_real_data] Raw effect sizes: mean={np.mean(effect_sizes):.3f}, std={np.std(effect_sizes):.3f}, range=[{np.min(effect_sizes):.3f}, {np.max(effect_sizes):.3f}]")
+        print(
+            f"[define_bio_injection_from_real_data] Robust effect sizes (normalized): mean={np.mean(d_robust):.3f}, std={np.std(d_robust):.3f}, range=[{np.min(d_robust):.3f}, {np.max(d_robust):.3f}]")
+        print(
+            f"[define_bio_injection_from_real_data] Differential mask: {int(differential_mask.sum())}/{len(differential_mask)} glycans are significant")
     # Step 4: Inject effects in CLR space (only for significant glycans)
     # z(U) = z(H) + m × bio_strength × d_robust
     # Note: We do NOT multiply by feature sigma here because in high-sparsity data,
@@ -345,7 +345,8 @@ def define_dirichlet_params_from_real_data(p_h, # array-like Baseline healthy di
 
 def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
                         seed=None, verbose=False,
-                        real_clr_ref=None, Sigma_lw=None, injection=None):
+                        real_clr_ref = None, Sigma_lw = None, injection = None,
+                        bio_strength = 1.0, scale_injection = False):
   """Simulate clean glycomics data.
   If real_clr_ref and Sigma_lw are provided, uses a Gaussian copula: LW correlation
   matrix defines inter-feature dependencies, empirical marginals from real_clr_ref
@@ -353,8 +354,9 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   (extracted via define_dirichlet_params_from_real_data) shifts the unhealthy mean.
   This gives strictly better marginal realism (KS) than MVN while preserving correlation
   structure (Mantel r) comparable to Ledoit-Wolf MVN sampling.
-  Falls back to Dirichlet sampling when real_clr_ref/Sigma_lw are not provided
-  (simulated-mode, no real data available).
+  In synthetic mode, injection is a (K_bio, n_glycans) matrix of
+  signed top eigenvectors scaled by bio_strength standard deviations each. In real-data
+  mode, injection is a (n_glycans,) vector from define_bio_injection_from_real_data.
   Parameters
   ----------
   alpha_H, alpha_U : (n_glycans,) Dirichlet concentration params for Dirichlet fallback
@@ -376,14 +378,8 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   n_glycans = len(alpha_H)
   labels = np.array([0] * n_H + [1] * n_U)
   if real_clr_ref is None or Sigma_lw is None:
-    # ── Dirichlet fallback (synthetic mode) ──────────────────────────────────
-    healthy_samples = dirichlet.rvs(alpha_H, size=n_H, random_state=rng) * 100
-    unhealthy_samples = dirichlet.rvs(alpha_U, size=n_U, random_state=rng) * 100
-    P = np.vstack([healthy_samples, unhealthy_samples])
-    if verbose:
-      print(f"simulate_clean_data [Dirichlet]: shape={P.shape}, min={P.min():.2e}, max={P.max():.2f}")
-    return P, labels
-  # ── Gaussian copula mode (templated mode) ──────────────────────────────
+      raise ValueError("real_clr_ref and Sigma_lw are required; Dirichlet fallback has been deprecated.")
+  # ── Gaussian copula mode ────────────────────────────────────────────────
   # Step 1: Derive correlation matrix from LW covariance
   std = np.sqrt(np.diag(Sigma_lw))
   std = np.where(std < 1e-10, 1.0, std)
@@ -412,7 +408,14 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
       p_H = alpha_H / alpha_H.sum()
       p_U = alpha_U / alpha_U.sum()
       injection = clr(p_U) - clr(p_H)
-  X[n_H:] += injection
+  if scale_injection:
+      rows = np.atleast_2d(injection)
+      stds = np.array([np.std(X @ (row / (np.linalg.norm(row) + 1e-10))) for row in rows])
+      for row, s in zip(rows, stds):
+          d_hat = row / (np.linalg.norm(row) + 1e-10)
+          X[n_H:] += d_hat * bio_strength * s
+  else:
+      X[n_H:] += injection
   # Step 6: Softmax back to percent-scale compositions
   shifted = X - X.max(axis=1, keepdims=True)
   exp_v = np.exp(shifted)

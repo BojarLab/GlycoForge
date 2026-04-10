@@ -8,7 +8,7 @@ from glycoforge.utils import clr, invclr
 from glycoforge.sim_bio_factor import (
     simulate_clean_data, 
     generate_alpha_U,
-    define_dirichlet_params_from_real_data
+    define_bio_injection_from_real_data
 )
 from glycoforge.sim_batch_factor import apply_batch_effect, define_batch_direction
 
@@ -26,34 +26,34 @@ def test_invclr_transform():
     assert np.allclose(x, x_back, atol=1e-5)
 
 def test_simulate_data():
+    from sklearn.covariance import LedoitWolf
     alpha_H = np.ones(10) * 5
     alpha_U, _ = generate_alpha_U(alpha_H, seed=42)
-    P, labels = simulate_clean_data(alpha_H, alpha_U, 10, 10, seed=42, verbose=False)
-    
+    rng = np.random.default_rng(0)
+    real_clr_ref = rng.standard_normal((20, 10))
+    Sigma_lw = LedoitWolf().fit(real_clr_ref).covariance_
+    P, labels = simulate_clean_data(alpha_H, alpha_U, 10, 10, seed=42, verbose=False,
+                                    real_clr_ref=real_clr_ref, Sigma_lw=Sigma_lw)
     assert P.shape == (20, 10)
-    assert np.allclose(P.sum(axis=1), 100.0)  # Returns percentage, sums to 100
+    assert np.allclose(P.sum(axis=1), 100.0)
     assert len(labels) == 20
 
 
-def test_define_dirichlet_params_from_real_data():
-    """Test Dirichlet parameters from real effect sizes"""
+def test_define_bio_injection_from_real_data():
+    """Test bio injection parameters from real effect sizes"""
     p_h = np.array([0.2, 0.3, 0.5])
     effect_sizes = np.array([1.2, -0.8, 0.1])
     differential_mask = np.array([1, 1, 0])
-    
-    alpha_H, alpha_U, debug_info = define_dirichlet_params_from_real_data(
+    alpha_H, alpha_U, debug_info = define_bio_injection_from_real_data(
         p_h, effect_sizes, differential_mask,
         bio_strength=1.0,
         k_dir=10,
         verbose=False
     )
-    
     assert alpha_H.shape == (3,)
     assert alpha_U.shape == (3,)
     assert np.all(alpha_H > 0)
     assert np.all(alpha_U > 0)
-    
-    # Check debug_info structure
     assert 'raw_effect_sizes' in debug_info
     assert 'd_robust' in debug_info
     assert 'injection' in debug_info

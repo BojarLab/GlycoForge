@@ -8,9 +8,60 @@ import warnings
 import contextlib
 import io
 from sklearn.covariance import LedoitWolf
-from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_dirichlet_params_from_real_data, define_differential_mask
+from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_bio_injection_from_real_data, define_differential_mask
 from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
 from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness
+
+
+def _build_copula_ref(n_glycans, glycan_class=None):
+  """Build pooled CLR reference matrix and LW covariance from glycowork datasets.
+  Mirrors the synthetic-mode pooling logic in simulate() but as a reusable helper
+  for simulate_paired, which needs separate refs for glycome A and B."""
+  _class_tag = {'N': '_n_', 'O': '_o_', 'GSL': '_gsl_'}.get(glycan_class)
+  _all_ds_names = [n for n in dir(_gcl) if not n.startswith('_') and isinstance(getattr(_gcl, n), pd.DataFrame)
+                   and (_class_tag is None or _class_tag in n.lower())]
+  _pooled_clr, _pooled_R = [], []
+  for _n in _all_ds_names:
+    _df = getattr(_gcl, _n).copy()
+    if _n.startswith('time_series'):
+      _seqs = [str(c) for c in _df.columns[1:]]
+      _mat = _df.iloc[:, 1:].apply(pd.to_numeric, errors='coerce').T.reset_index(drop=True)
+    else:
+      _seqs = [str(g) for g in _df['glycan'].tolist()] if 'glycan' in _df.columns else []
+      _mat = _df.drop(columns=['glycan'], errors='ignore').select_dtypes(include=[np.number]).reset_index(drop=True)
+    if not _seqs or _mat.empty or len(_seqs) < n_glycans:
+      continue
+    _seen, _keep = set(), []
+    for _i, _g in enumerate(_seqs):
+      if _g not in _seen:
+        _seen.add(_g)
+        _keep.append(_i)
+    _sub = _mat.iloc[_keep].reset_index(drop=True)
+    _top = _sub.mean(axis=1).nlargest(n_glycans).index.tolist()
+    _vals = _sub.iloc[_top].values.T
+    _vals = _vals[~np.isnan(_vals).any(axis=1)]
+    if _vals.shape[0] < 2:
+      continue
+    _clr_i = clr(_vals)
+    if _clr_i.shape[1] < n_glycans:
+      continue
+    _lw_i = LedoitWolf().fit(_clr_i).covariance_
+    _std_i = np.sqrt(np.diag(_lw_i))
+    _std_i = np.where(_std_i < 1e-10, 1.0, _std_i)
+    _R_i = _lw_i / np.outer(_std_i, _std_i)
+    np.fill_diagonal(_R_i, 1.0)
+    _pooled_clr.append(_clr_i)
+    _pooled_R.append(_R_i)
+  if not _pooled_R:
+      raise ValueError(
+          f"No glycowork datasets found with >= {n_glycans} glycans for class '{glycan_class}'. Try a lower n_glycans or glycan_class=None.")
+  _R_consensus = np.mean(_pooled_R, axis=0)
+  np.fill_diagonal(_R_consensus, 1.0)
+  _clr_all = np.vstack(_pooled_clr)
+  _pooled_std = np.std(_clr_all, axis=0)
+  _pooled_std = np.where(_pooled_std < 1e-10, 1.0, _pooled_std)
+  _Sigma = _R_consensus * np.outer(_pooled_std, _pooled_std)
+  return _clr_all, _Sigma
 
 
 def simulate(
@@ -228,6 +279,9 @@ def simulate(
         _pooled_std = np.std(_clr_all_syn, axis = 0)
         _pooled_std = np.where(_pooled_std < 1e-10, 1.0, _pooled_std)
         _Sigma_syn = _R_consensus * np.outer(_pooled_std, _pooled_std)
+        _K_bio = min(3, n_glycans - 1)
+        _, _evecs_syn = np.linalg.eigh(_Sigma_syn)
+        _top_evecs_syn = _evecs_syn[:, -_K_bio:]
         # Build alpha_H from pooled mean abundance profile
         _p_h_syn = np.maximum(np.mean(np.vstack([
             _ds_mat.iloc[_ds_mat.mean(axis = 1).nlargest(n_glycans).index].mean(axis = 1).values
@@ -364,7 +418,7 @@ def simulate(
                 n_differential = int(differential_mask.sum())
                 print(f"[Real Data] {n_differential}/{len(differential_mask)} glycans will have effects injected")
             # Call new function with real effect sizes via CLR-space injection
-            alpha_H, alpha_U_base, bio_debug_info = define_dirichlet_params_from_real_data(
+            alpha_H, alpha_U_base, bio_debug_info = define_bio_injection_from_real_data(
                 p_h=p_h,
                 effect_sizes=real_effect_sizes,
                 differential_mask=differential_mask,
@@ -439,32 +493,24 @@ def simulate(
             print(f"\n--- Run {run_idx + 1}/{len(random_seeds)} (seed={seed}) ---")
         # Generate alpha_U per-run
         if use_real_effect_sizes:
-            # Use alpha_U from define_dirichlet_params (based on real effect sizes)
+            # Use alpha_U from define_bio_injection_from_real_data (real effect sizes)
             alpha_U = alpha_U_base
             if verbose:
                 print(f"[Real Data] Using alpha_U from real effect sizes")
         else:
-            # Generate alpha_U synthetically
-            alpha_U, delta = generate_alpha_U(alpha_H,
-                                              up_frac=0.3,
-                                              down_frac=0.35,
-                                              glycan_sequences=glycan_sequences,
-                                              motif_rules=motif_rules,
-                                              motif_bias=motif_bias,
-                                              seed=seed,
-                                              verbose=verbose)
-        if verbose:
-            print(f"alpha_U range: [{alpha_U.min():.2f}, {alpha_U.max():.2f}]")
+            _rng_bio = np.random.default_rng(seed + 999)
+            _signs_syn = np.sign(_rng_bio.standard_normal(_K_bio))
+            _injection_dir_syn = (_top_evecs_syn * _signs_syn).T
+            alpha_U = alpha_H.copy()
         # Step 3: Generate clean data
         if use_real_effect_sizes:
             P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
                                             real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn, injection = np.array(bio_debug_info['injection']))
         else:
-            _p_H_syn = alpha_H / alpha_H.sum()
-            _p_U_syn = alpha_U / alpha_U.sum()
-            _injection_syn = (clr(_p_U_syn) - clr(_p_H_syn)) * bio_strength
             P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
-                                            real_clr_ref = _clr_all_syn, Sigma_lw = _Sigma_syn, injection = _injection_syn)
+                                            real_clr_ref = _clr_all_syn, Sigma_lw = _Sigma_syn,
+                                            injection = _injection_dir_syn, bio_strength = bio_strength,
+                                            scale_injection = True)
         if glycan_sequences is not None:
             glycan_index = glycan_sequences[:n_glycans]
             index_name = "glycan"
@@ -607,8 +653,8 @@ def simulate(
         # Step 4: Missingness diagnostics (if applied)
         if missing_fraction > 0:
             quality_checks['missingness'] = missing_diagnostics
-        # Construct dirichlet_parameters
-        dirichlet_parameters = {
+        # Construct bio_signal_params
+        bio_signal_params  = {
             'alpha_H': alpha_H.tolist(),
             'alpha_U': alpha_U.tolist(),
             'differential_mask': differential_mask.tolist() if differential_mask is not None and hasattr(differential_mask, 'tolist') else None
@@ -634,7 +680,7 @@ def simulate(
             'bio_parameters': bio_parameters,
             'batch_parameters': batch_parameters,
             'quality_checks': quality_checks,
-            'dirichlet_parameters': dirichlet_parameters,
+            'bio_signal_params': bio_signal_params,
             'sample_info': sample_info
         })
         # Add data processing information for transparency and debugging
@@ -740,6 +786,7 @@ def simulate_paired(
   n_batches=3,
   # ── Glycome A ──────────────────────────────────────────────────────────────
   n_glycans_A=50,
+  glycan_class_A="N",
   bio_strength_A=1.5,
   k_dir_A=100,
   variance_ratio_A=1.5,
@@ -751,6 +798,7 @@ def simulate_paired(
   batch_motif_rules_A=None,
   # ── Glycome B ──────────────────────────────────────────────────────────────
   n_glycans_B=50,
+  glycan_class_B="O",
   bio_strength_B=1.5,
   k_dir_B=100,
   variance_ratio_B=1.5,
@@ -817,6 +865,10 @@ def simulate_paired(
       Number of healthy and unhealthy samples. Identical for both glycomes.
   n_glycans_A/B : int
       Number of glycan features in each glycome.
+  glycan_class_A/B : str or None
+      Glycan class filter for pooled reference construction ('N', 'O', 'GSL', or None
+      for no filtering). Defaults 'N'/'O' reflecting the canonical paired use case.
+      Set to None to pool across all classes when class-matched datasets are scarce.
   bio_strength_A/B : float
       Scaling of the biological effect in CLR space for each glycome. Higher values
       produce more separated healthy/unhealthy distributions.
@@ -905,19 +957,27 @@ def simulate_paired(
   # Batch direction vectors are generated once (u_dict_seed fixed) so the batch
   # structure is identical across runs; only the biological and coupling draws vary.
   # Seeds 42 and 43 again keep A and B independent.
+  _clr_ref_A, _Sigma_A = _build_copula_ref(n_glycans_A, glycan_class = glycan_class_A)
+  _clr_ref_B, _Sigma_B = _build_copula_ref(n_glycans_B, glycan_class = glycan_class_B)
+  _K_bio_A = min(3, n_glycans_A - 1)
+  _, _evecs_A = np.linalg.eigh(_Sigma_A)
+  _top_evecs_A = _evecs_A[:, -_K_bio_A:]
+  _K_bio_B = min(3, n_glycans_B - 1)
+  _, _evecs_B = np.linalg.eigh(_Sigma_B)
+  _top_evecs_B = _evecs_B[:, -_K_bio_B:]
   u_dict_A, _ = define_batch_direction(
-    n_glycans=n_glycans_A, n_batches=n_batches,
-    affected_fraction=affected_fraction, positive_prob=positive_prob,
-    overlap_prob=overlap_prob, u_dict_seed=42,
-    glycan_sequences=glycan_sequences_A, batch_motif_rules=batch_motif_rules_A,
-    verbose=verbose
+      n_glycans = n_glycans_A, n_batches = n_batches,
+      affected_fraction = affected_fraction, positive_prob = positive_prob,
+      overlap_prob = overlap_prob, u_dict_seed = 42,
+      glycan_sequences = glycan_sequences_A, batch_motif_rules = batch_motif_rules_A,
+      verbose = verbose
   )
   u_dict_B, _ = define_batch_direction(
-    n_glycans=n_glycans_B, n_batches=n_batches,
-    affected_fraction=affected_fraction, positive_prob=positive_prob,
-    overlap_prob=overlap_prob, u_dict_seed=43,
-    glycan_sequences=glycan_sequences_B, batch_motif_rules=batch_motif_rules_B,
-    verbose=verbose
+      n_glycans = n_glycans_B, n_batches = n_batches,
+      affected_fraction = affected_fraction, positive_prob = positive_prob,
+      overlap_prob = overlap_prob, u_dict_seed = 43,
+      glycan_sequences = glycan_sequences_B, batch_motif_rules = batch_motif_rules_B,
+      verbose = verbose
   )
   sample_cols = (
     [f"healthy_{i+1}" for i in range(n_H)] +
@@ -946,14 +1006,21 @@ def simulate_paired(
       motif_bias=motif_bias_B, seed=seed + 1000, verbose=verbose
     )
     # Simulate clean compositional data: (n_samples × n_glycans)
+    _rng_bio_A = np.random.default_rng(seed + 999)
+    _signs_A = np.sign(_rng_bio_A.standard_normal(_K_bio_A))
+    _inj_dir_A = (_top_evecs_A * _signs_A).T
+    _rng_bio_B = np.random.default_rng(seed + 1999)
+    _signs_B = np.sign(_rng_bio_B.standard_normal(_K_bio_B))
+    _inj_dir_B = (_top_evecs_B * _signs_B).T
     P_A, bio_labels = simulate_clean_data(
-      alpha_H_A, alpha_U_A, n_H, n_U, seed=seed, verbose=verbose
+        alpha_H_A, alpha_U_A, n_H, n_U, seed = seed, verbose = verbose,
+        real_clr_ref = _clr_ref_A, Sigma_lw = _Sigma_A,
+        injection = _inj_dir_A, bio_strength = bio_strength_A, scale_injection = True
     )
-    # seed+1 for B so that even without coupling the two Dirichlet draws are
-    # independent; using the same seed would create spurious correlation from
-    # the random number stream inside simulate_clean_data.
     P_B, _ = simulate_clean_data(
-      alpha_H_B, alpha_U_B, n_H, n_U, seed=seed + 1, verbose=verbose
+        alpha_H_B, alpha_U_B, n_H, n_U, seed = seed + 1, verbose = verbose,
+        real_clr_ref = _clr_ref_B, Sigma_lw = _Sigma_B,
+        injection = _inj_dir_B, bio_strength = bio_strength_B, scale_injection = True
     )
     Y_A_clr = clr(P_A)   # (n_samples × n_glycans_A)
     Y_B_clr = clr(P_B)
