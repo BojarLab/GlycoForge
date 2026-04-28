@@ -347,15 +347,15 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
                         seed=None, verbose=False,
                         real_clr_ref = None, Sigma_lw = None, injection = None,
                         bio_strength = 1.0, scale_injection = False):
-  """Simulate clean glycomics data.
-  If real_clr_ref and Sigma_lw are provided, uses a Gaussian copula: LW correlation
+  """Simulate clean glycomics data via Gaussian copula. Requires real_clr_ref and Sigma_lw (Dirichlet fallback deprecated). Gaussian copula: LW correlation
   matrix defines inter-feature dependencies, empirical marginals from real_clr_ref
   define per-feature distributions, and the CLR-space injection from alpha_H/alpha_U
   (extracted via define_dirichlet_params_from_real_data) shifts the unhealthy mean.
   This gives strictly better marginal realism (KS) than MVN while preserving correlation
   structure (Mantel r) comparable to Ledoit-Wolf MVN sampling.
   In synthetic mode, injection is a (K_bio, n_glycans) matrix of
-  signed top eigenvectors scaled by bio_strength standard deviations each. In real-data
+  signed top eigenvectors; bio_strength controls the effect magnitude,
+  scaled by sqrt(n_glycans) to remain PVCA-meaningful across feature counts. In real-data
   mode, injection is a (n_glycans,) vector from define_bio_injection_from_real_data.
   Parameters
   ----------
@@ -410,10 +410,11 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
       injection = clr(p_U) - clr(p_H)
   if scale_injection:
       rows = np.atleast_2d(injection)
+      dim_scale = np.sqrt(X.shape[1])
       stds = np.array([np.std(X @ (row / (np.linalg.norm(row) + 1e-10))) for row in rows])
       for row, s in zip(rows, stds):
           d_hat = row / (np.linalg.norm(row) + 1e-10)
-          X[n_H:] += d_hat * bio_strength * s
+          X[n_H:] += d_hat * bio_strength * s * dim_scale
   else:
       X[n_H:] += injection
   # Step 6: Softmax back to percent-scale compositions

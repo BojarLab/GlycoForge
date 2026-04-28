@@ -67,14 +67,17 @@ def find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose
             print(f"  {prefix}network pair: [{u_idx}] {u} ↔ [{v_idx}] {v} (edge: {edge_label}, {motif} {direction_str})")
         except ValueError:
           pass
+  paired_set = set(substrates) | set(products)
   unpaired_up, unpaired_down = [], []
-  for idx, seq in enumerate(glycan_sequences):
-    if subgraph_isomorphism(seq, motif):
-      if idx not in substrates and idx not in products:
-        if is_loss:
-          unpaired_down.append(idx)
-        elif is_gain:
-          unpaired_up.append(idx)
+  for motif, direction in motif_rules.items():
+      is_loss = direction.lower() in ["down", "downregulate", "decrease"]
+      is_gain = direction.lower() in ["up", "upregulate", "increase"]
+      for idx, seq in enumerate(glycan_sequences):
+          if idx not in paired_set and subgraph_isomorphism(seq, motif):
+              if is_loss:
+                  unpaired_down.append(idx)
+              elif is_gain:
+                  unpaired_up.append(idx)
   return {'substrates': substrates, 'products': products, 'unpaired_up': unpaired_up, 'unpaired_down': unpaired_down}
 
 

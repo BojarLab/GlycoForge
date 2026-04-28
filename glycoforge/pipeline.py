@@ -13,14 +13,14 @@ from glycoforge.sim_batch_factor import define_batch_direction, stratified_batch
 from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness
 
 
-def _build_copula_ref(n_glycans, glycan_class=None):
+def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
   """Build pooled CLR reference matrix and LW covariance from glycowork datasets.
   Mirrors the synthetic-mode pooling logic in simulate() but as a reusable helper
   for simulate_paired, which needs separate refs for glycome A and B."""
   _class_tag = {'N': '_n_', 'O': '_o_', 'GSL': '_gsl_'}.get(glycan_class)
   _all_ds_names = [n for n in dir(_gcl) if not n.startswith('_') and isinstance(getattr(_gcl, n), pd.DataFrame)
                    and (_class_tag is None or _class_tag in n.lower())]
-  _pooled_clr, _pooled_R = [], []
+  _pooled_clr, _pooled_R, _candidates = [], [], []
   for _n in _all_ds_names:
     _df = getattr(_gcl, _n).copy()
     if _n.startswith('time_series'):
@@ -52,6 +52,7 @@ def _build_copula_ref(n_glycans, glycan_class=None):
     np.fill_diagonal(_R_i, 1.0)
     _pooled_clr.append(_clr_i)
     _pooled_R.append(_R_i)
+    _candidates.append((_n, _seqs, _sub))
   if not _pooled_R:
       raise ValueError(
           f"No glycowork datasets found with >= {n_glycans} glycans for class '{glycan_class}'. Try a lower n_glycans or glycan_class=None.")
@@ -61,6 +62,8 @@ def _build_copula_ref(n_glycans, glycan_class=None):
   _pooled_std = np.std(_clr_all, axis=0)
   _pooled_std = np.where(_pooled_std < 1e-10, 1.0, _pooled_std)
   _Sigma = _R_consensus * np.outer(_pooled_std, _pooled_std)
+  if return_candidates:
+      return _clr_all, _Sigma, _candidates, len(_pooled_R), _class_tag
   return _clr_all, _Sigma
 
 
@@ -224,61 +227,7 @@ def simulate(
     # Step 1: Prepare alpha_H based on data source
     bio_debug_info = None  # Initialize debug info storage
     if data_source == "simulated":
-        _all_ds_names = [n for n in dir(_gcl) if not n.startswith('_') and isinstance(getattr(_gcl, n), pd.DataFrame)]
-        _all_ds = []
-        for _n in _all_ds_names:
-            _df = getattr(_gcl, _n).copy()
-            if _n.startswith('time_series'):
-                _seqs = [str(c) for c in _df.columns[1:]]
-                _mat = _df.iloc[:, 1:].apply(pd.to_numeric, errors = 'coerce').T.reset_index(drop = True)
-            else:
-                _seqs = [str(g) for g in _df['glycan'].tolist()] if 'glycan' in _df.columns else []
-                _mat = _df.drop(columns = ['glycan'], errors = 'ignore').select_dtypes(
-                    include = [np.number]).reset_index(drop = True)
-            if not _seqs or _mat.empty:
-                continue
-            _seen, _keep = set(), []
-            for _i, _g in enumerate(_seqs):
-                if _g not in _seen:
-                    _seen.add(_g)
-                    _keep.append(_i)
-            _all_ds.append((_n, [_seqs[i] for i in _keep], _mat.iloc[_keep].reset_index(drop = True)))
-        # Select datasets matching glycan class
-        _class_tag = {'N': '_n_', 'O': '_o_', 'GSL': '_gsl_'}.get(glycan_class)
-        _candidates = [t for t in _all_ds if len(t[1]) >= n_glycans and
-                       (_class_tag is None or _class_tag in t[0].lower())]
-        if not _candidates:
-            _candidates = [t for t in _all_ds if len(t[1]) >= n_glycans]
-        if not _candidates:
-            _candidates = sorted(_all_ds, key = lambda x: -len(x[1]))
-        n_glycans = min(n_glycans, max(len(t[1]) for t in _candidates))
-        _pooled_clr, _pooled_R = [], []
-        for _ds_name, _ds_seqs, _ds_mat in _candidates:
-            _n_avail = len(_ds_seqs)
-            _n_take = min(n_glycans, _n_avail)
-            _top_pos = _ds_mat.mean(axis = 1).nlargest(_n_take).index.tolist()
-            _sub = _ds_mat.iloc[_top_pos].reset_index(drop = True)
-            _sub_vals = _sub.values.T  # (n_samples, n_glycans)
-            _sub_vals = _sub_vals[~np.isnan(_sub_vals).any(axis = 1)]
-            if _sub_vals.shape[0] < 2:
-                continue
-            _clr_i = clr(_sub_vals)
-            if _clr_i.shape[1] < n_glycans:
-                continue  # skip datasets that can't provide enough glycans after dedup
-            _lw_i = LedoitWolf().fit(_clr_i).covariance_
-            _std_i = np.sqrt(np.diag(_lw_i))
-            _std_i = np.where(_std_i < 1e-10, 1.0, _std_i)
-            _R_i = _lw_i / np.outer(_std_i, _std_i)
-            np.fill_diagonal(_R_i, 1.0)
-            _pooled_R.append(_R_i)
-            _pooled_clr.append(_clr_i)
-        _R_consensus = np.mean(_pooled_R, axis = 0)
-        np.fill_diagonal(_R_consensus, 1.0)
-        _clr_all_syn = np.vstack(_pooled_clr)
-        # Reconstruct a usable Sigma_syn from consensus R and pooled marginal stds
-        _pooled_std = np.std(_clr_all_syn, axis = 0)
-        _pooled_std = np.where(_pooled_std < 1e-10, 1.0, _pooled_std)
-        _Sigma_syn = _R_consensus * np.outer(_pooled_std, _pooled_std)
+        _clr_all_syn, _Sigma_syn, _candidates, _n_datasets, _class_tag = _build_copula_ref(n_glycans, glycan_class=glycan_class, return_candidates=True)
         _K_bio = min(3, n_glycans - 1)
         _, _evecs_syn = np.linalg.eigh(_Sigma_syn)
         _top_evecs_syn = _evecs_syn[:, -_K_bio:]
@@ -296,8 +245,7 @@ def simulate(
         real_effect_sizes = None
         alpha_U_base = None
         if verbose:
-            print(
-                f"[Synthetic] Pooled covariance from {len(_pooled_R)} datasets ({n_glycans} glycans each, {_clr_all_syn.shape[0]} total samples)")
+            print(f"[Synthetic] Pooled covariance from {_n_datasets} datasets ({n_glycans} glycans each, {_clr_all_syn.shape[0]} total samples)")
             if _class_tag:
                 print(f"[Synthetic] Glycan class filter: {_class_tag}")
     elif data_source == "real":
@@ -352,6 +300,7 @@ def simulate(
             with contextlib.redirect_stdout(stdout_capture), \
                  warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
+                np.random.seed(42)
                 results = get_differential_expression(
                     df_processed,
                     group1=bm_cols,
@@ -568,7 +517,7 @@ def simulate(
             kappa_mu=kappa_mu,
             var_b=var_b,
             seed=seed,
-            batch_motif_rules=batch_motif_rules if 'batch_motif_rules' in locals() else None,
+            batch_motif_rules=batch_motif_rules,
             glycan_sequences=glycan_sequences,
             batch_mode = batch_mode
         )

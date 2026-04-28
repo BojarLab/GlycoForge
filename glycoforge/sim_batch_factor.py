@@ -166,17 +166,17 @@ def apply_batch_effect(Y_clean # (samples x glycans) clean CLR matrix
         # variance inflation (batch-specific scale)
         if var_b > 0:
             var_scale = batch_var_scales[b]
-            var_scalor = rng.normal(loc = 0.0, scale = np.sqrt(var_scale) * sigma, size = n_glycans)
+            var_scalar = rng.normal(loc = 0.0, scale = np.sqrt(var_scale) * sigma, size = n_glycans)
             if b in compositional_pairs:
                 pairs = compositional_pairs[b]
                 for sub_idx, prod_idx in zip(pairs['substrates'], pairs['products']):
                     shared_noise = rng.normal(loc = 0.0, scale = np.sqrt(var_scale) * sigma[sub_idx])
-                    var_scalor[sub_idx] = -shared_noise
-                    var_scalor[prod_idx] = shared_noise
+                    var_scalar[sub_idx] = -shared_noise
+                    var_scalar[prod_idx] = shared_noise
         else:
-            var_scalor = np.zeros(n_glycans)
+            var_scalar = np.zeros(n_glycans)
         # apply to sample
-        Y_with_batch_clr[i, :] += mean_shift + var_scalor
+        Y_with_batch_clr[i, :] += mean_shift + var_scalar
     Y_with_batch_compositional = np.zeros_like(Y_with_batch_clr)
     for i in range(n_samples):
         Y_with_batch_compositional[i, :] = invclr(Y_with_batch_clr[i, :])  # Scale to percentage
