@@ -187,6 +187,12 @@ def simulate(
                 'u_dict': u_dict,
                 'missing_fraction': missing_fraction,
                 'mnar_bias': mnar_bias,
+                'glycan_sequences': glycan_sequences,
+                'motif_rules': motif_rules,
+                'motif_bias': motif_bias,
+                'batch_motif_rules': batch_motif_rules,
+                'batch_motif_bias': batch_motif_bias,
+                'batch_mode': batch_mode,
                 'random_seeds': random_seeds,
                 'output_dir': sub_dir,
                 'verbose': verbose,
@@ -243,7 +249,16 @@ def simulate(
             _top_pos = _rep_mat.mean(axis = 1).nlargest(n_glycans).index.tolist()
             glycan_sequences = [_rep_seqs[i] for i in _top_pos]
         real_effect_sizes = None
-        alpha_U_base = None
+        if motif_rules is not None and glycan_sequences is not None:
+            _alpha_U_motif, _ = generate_alpha_U(
+                alpha_H, up_frac = 0.3, down_frac = 0.35,
+                glycan_sequences = glycan_sequences[:n_glycans],
+                motif_rules = motif_rules, motif_bias = motif_bias,
+                seed = 42, verbose = verbose
+            )
+            alpha_U_base = _alpha_U_motif
+        else:
+            alpha_U_base = None
         if verbose:
             print(f"[Synthetic] Pooled covariance from {_n_datasets} datasets ({n_glycans} glycans each, {_clr_all_syn.shape[0]} total samples)")
             if _class_tag:
@@ -447,19 +462,26 @@ def simulate(
             if verbose:
                 print(f"[Real Data] Using alpha_U from real effect sizes")
         else:
-            _rng_bio = np.random.default_rng(seed + 999)
-            _signs_syn = np.sign(_rng_bio.standard_normal(_K_bio))
-            _injection_dir_syn = (_top_evecs_syn * _signs_syn).T
-            alpha_U = alpha_H.copy()
+            if alpha_U_base is not None:
+                alpha_U = alpha_U_base
+                _p_H_syn = alpha_H / alpha_H.sum()
+                _p_U_syn = alpha_U / alpha_U.sum()
+                _injection_dir_syn = clr(_p_U_syn) - clr(_p_H_syn)
+            else:
+                _rng_bio = np.random.default_rng(seed + 999)
+                _signs_syn = np.sign(_rng_bio.standard_normal(_K_bio))
+                _injection_dir_syn = (_top_evecs_syn * _signs_syn).T
+                alpha_U = alpha_H.copy()
         # Step 3: Generate clean data
         if use_real_effect_sizes:
             P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
                                             real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn, injection = np.array(bio_debug_info['injection']))
         else:
+            _use_scale = (alpha_U_base is None)
             P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
                                             real_clr_ref = _clr_all_syn, Sigma_lw = _Sigma_syn,
                                             injection = _injection_dir_syn, bio_strength = bio_strength,
-                                            scale_injection = True)
+                                            scale_injection = _use_scale)
         if glycan_sequences is not None:
             glycan_index = glycan_sequences[:n_glycans]
             index_name = "glycan"
@@ -955,21 +977,33 @@ def simulate_paired(
       motif_bias=motif_bias_B, seed=seed + 1000, verbose=verbose
     )
     # Simulate clean compositional data: (n_samples × n_glycans)
-    _rng_bio_A = np.random.default_rng(seed + 999)
-    _signs_A = np.sign(_rng_bio_A.standard_normal(_K_bio_A))
-    _inj_dir_A = (_top_evecs_A * _signs_A).T
-    _rng_bio_B = np.random.default_rng(seed + 1999)
-    _signs_B = np.sign(_rng_bio_B.standard_normal(_K_bio_B))
-    _inj_dir_B = (_top_evecs_B * _signs_B).T
+    _has_motif_A = (motif_rules_A is not None and glycan_sequences_A is not None)
+    _has_motif_B = (motif_rules_B is not None and glycan_sequences_B is not None)
+    if _has_motif_A:
+        _p_H_A = alpha_H_A / alpha_H_A.sum()
+        _p_U_A = alpha_U_A / alpha_U_A.sum()
+        _inj_dir_A = clr(_p_U_A) - clr(_p_H_A)
+    else:
+        _rng_bio_A = np.random.default_rng(seed + 999)
+        _signs_A = np.sign(_rng_bio_A.standard_normal(_K_bio_A))
+        _inj_dir_A = (_top_evecs_A * _signs_A).T
+    if _has_motif_B:
+        _p_H_B = alpha_H_B / alpha_H_B.sum()
+        _p_U_B = alpha_U_B / alpha_U_B.sum()
+        _inj_dir_B = clr(_p_U_B) - clr(_p_H_B)
+    else:
+        _rng_bio_B = np.random.default_rng(seed + 1999)
+        _signs_B = np.sign(_rng_bio_B.standard_normal(_K_bio_B))
+        _inj_dir_B = (_top_evecs_B * _signs_B).T
     P_A, bio_labels = simulate_clean_data(
         alpha_H_A, alpha_U_A, n_H, n_U, seed = seed, verbose = verbose,
         real_clr_ref = _clr_ref_A, Sigma_lw = _Sigma_A,
-        injection = _inj_dir_A, bio_strength = bio_strength_A, scale_injection = True
+        injection = _inj_dir_A, bio_strength = bio_strength_A, scale_injection = not _has_motif_A
     )
     P_B, _ = simulate_clean_data(
         alpha_H_B, alpha_U_B, n_H, n_U, seed = seed + 1, verbose = verbose,
         real_clr_ref = _clr_ref_B, Sigma_lw = _Sigma_B,
-        injection = _inj_dir_B, bio_strength = bio_strength_B, scale_injection = True
+        injection = _inj_dir_B, bio_strength = bio_strength_B, scale_injection = not _has_motif_B
     )
     Y_A_clr = clr(P_A)   # (n_samples × n_glycans_A)
     Y_B_clr = clr(P_B)
