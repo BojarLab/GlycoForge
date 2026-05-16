@@ -43,15 +43,13 @@ See [run_simulation.ipynb](run_simulation.ipynb) [![Open In Colab](https://colab
 
 ## How the simulator works
 
-We keep everything in the CLR (centered log-ratio) space:
+All simulation operates in CLR (centered log-ratio) space using a **Gaussian copula** sampler:
 
-- First, draw a healthy baseline composition from a Dirichlet prior: `p_H ~ Dirichlet(alpha_H)`.
-- Flip to CLR: `z_H = clr(p_H)`.
-- For selected glycans, push the signal using real or synthetic effect sizes: `z_U = z_H + m * lambda * d_robust`, where `m` is the differential mask, `lambda` is `bio_strength`, and `d_robust` is the effect vector after `robust_effect_size_processing`.
-    - **Simplified mode**: draw synthetic effect sizes (log-fold changes) and pass them through the same robust processing pipeline.
-    - **Hybrid mode**: start from the Cohen's *d* values returned by `glycowork.get_differential_expression`; `define_differential_mask` lets you restrict the injection to significant hits or top-*N* glycans before scaling.
-- Invert back to proportions: `p_U = invclr(z_U)` and scale by `k_dir` to get `alpha_U`, note that the healthy and unhealthy Dirichlet strengths use different `k_dir` values, and a separate `variance_ratio` controls their relative magnitude.
-- Batch effects ride on top as direction vectors `u_b`, so a clean CLR sample `Y_clean` becomes `Y_with_batch = Y_clean + kappa_mu * sigma * u_b + epsilon`, with `var_b` controlling spread.
+- **Reference construction**: In *synthetic mode*, pool all class-matched `glycowork` datasets, compute per-dataset Ledoit-Wolf covariance, extract and average correlation matrices into a consensus `R`, and collect empirical CLR marginals from the pooled samples. In *templated mode*, compute a single Ledoit-Wolf covariance and extract empirical CLR marginals from the input dataset's samples.
+- **Clean data generation** (`simulate_clean_data`): Draw `Z ~ N(0, R_reg)`, apply the probability integral transform to get uniform marginals, then map to real CLR empirical quantiles via linear interpolation. This preserves both inter-feature correlation (Mantel r) and marginal realism (KS).
+- **Biological injection**: In *templated mode*, inject real effect sizes in CLR space: `z_U = z_H + m * lambda * d_robust`, where `m` is the differential mask, `lambda` is `bio_strength`, and `d_robust` is the effect vector after `robust_effect_size_processing`. In *synthetic mode*, inject along the top-K eigenvectors of the pooled covariance with random signs, scaled by `bio_strength * std * sqrt(n_glycans)` to remain PVCA-meaningful across feature counts. The `alpha_H` and `alpha_U` parameters are computed to define the CLR-space injection direction (via `clr(p_U) - clr(p_H)`)
+- **Batch effects**: Two modes controlled by `batch_mode`. In additive mode (default, ComBat-correctable): `Y_batch = Y_clean + kappa_mu * sigma * u_b + epsilon`. In multiplicative mode (non-linear): `Y_batch = Y_clean + kappa_mu * u_b * Y_clean + epsilon`. Variance inflation uses batch-specific scale factors spread evenly around 1.0, controlled by `var_b`. Compositional pairing ensures substrate-product glycans receive correlated noise.
+- **MNAR missingness**: Logistic model in log-abundance space with per-sample intercept solved via Brent's method for exact target missingness fraction.
 
 ## Simulation Modes
 
@@ -66,21 +64,19 @@ No real data dependency. Ideal for controlled experiments with known ground trut
 
 **Pipeline steps:**
 
-1. Initializes log-normal healthy baseline: `alpha_H` sampled from log-normal distribution (μ=0, σ=1, fixed seed=42), rescaled to mean of 10
-2. For each random seed, generates `alpha_U` by randomly scaling `alpha_H`:
-   - `up_frac` (default 30%) upregulated with scale factors from `up_scale_range=(1.1, 3.0)`
-   - `down_frac` (default 35%) downregulated with scale factors from `down_scale_range=(0.3, 0.9)`
-   - Remaining glycans (~35%) stay unchanged
-3. Samples clean cohorts from `Dirichlet(alpha_H)` and `Dirichlet(alpha_U)` with `n_H` healthy and `n_U` unhealthy samples
-4. Defines batch effect direction vectors `u_dict` once per simulation run (fixed seed ensures reproducible batch geometry across parameter sweep)
-5. Applies batch effects controlled by `kappa_mu` (shift strength) and `var_b` (variance scaling)
-6. Optionally applies MNAR (Missing Not At Random) missingness:
+1. Pools all class-matched glycowork datasets (filtered by `glycan_class`) to build a consensus Ledoit-Wolf correlation matrix and empirical CLR marginals via `_build_copula_ref`
+2. Constructs `alpha_H` from the pooled mean abundance profile across all candidate datasets, scaled to sum proportional to `10 * n_glycans`
+3. For each random seed, generates `alpha_U` by randomly scaling `alpha_H` (30% up, 35% down by default), or via motif-guided compositional pairing if `motif_rules` is provided
+4. Samples clean cohorts via Gaussian copula (LW correlation + empirical marginals) with biological injection along top-K eigenvectors of the pooled covariance, scaled by `bio_strength`
+5. Defines batch effect direction vectors `u_dict` once per simulation run (fixed seed ensures reproducible batch geometry across parameter sweep)
+6. Applies batch effects controlled by `kappa_mu` (shift strength) and `var_b` (variance scaling)
+7. Optionally applies MNAR (Missing Not At Random) missingness:
    - `missing_fraction`: proportion of missing values (0.0–1.0)
    - `mnar_bias`: intensity-dependent bias (default 2.0, range 0.5–5.0)
    - Left-censored pattern: low-abundance glycans more likely to be missing
-7. Grid search over `kappa_mu` and `var_b` produces multiple datasets under identical batch effect structure
+8. Grid search over `kappa_mu` and `var_b` produces multiple datasets under identical batch effect structure
 
-**Key parameters:** `n_glycans`, `n_H`, `n_U`, `kappa_mu`, `var_b`, `missing_fraction`, `mnar_bias`
+**Key parameters:** `n_glycans`, `n_H`, `n_U`, `kappa_mu`, `var_b`, `batch_mode`, `missing_fraction`, `mnar_bias`
 
 </details>
 
@@ -107,14 +103,14 @@ Starts from real glycomics data to preserve biological signal structure. Accepts
    - Returns normalized `d_robust` scaled by `bio_strength`
 6. Injects effects in CLR space: `z_U = z_H + mask * bio_strength * d_robust`
 7. Converts back to proportions: `p_U = invclr(z_U)`
-8. Scales by Dirichlet concentration: `alpha_H = k_dir * p_H` and `alpha_U = (k_dir / variance_ratio) * p_U`
-9. Samples clean cohorts from `Dirichlet(alpha_H)` and `Dirichlet(alpha_U)` with `n_H` healthy and `n_U` unhealthy samples
+8. Computes Ledoit-Wolf covariance from pooled CLR data
+9. Samples clean cohorts via Gaussian copula using LW correlation and empirical CLR marginals, with the CLR injection vector shifting unhealthy samples
 10. Defines batch effect direction vectors `u_dict` once per run (fixed seed ensures fair comparison across parameter combinations)
-11. Applies batch effects: `y_batch = y_clean + kappa_mu * sigma * u_b + epsilon`, where `epsilon ~ N(0, sqrt(var_b) * sigma)`
+11. Applies batch effects: in additive mode, `y_batch = y_clean + kappa_mu * sigma * u_b + epsilon`; in multiplicative mode, `y_batch = y_clean + kappa_mu * u_b * y_clean + epsilon`, where variance inflation uses batch-specific scale factors controlled by `var_b`
 12. Optionally applies MNAR missingness (same as Simplified mode)
 13. Grid search over `bio_strength`, `k_dir`, `variance_ratio`, `kappa_mu`, `var_b` to systematically test biological signal and batch effect interactions
 
-**Key parameters:** `data_file`, `column_prefix`, `bio_strength`, `k_dir`, `variance_ratio`, `differential_mask`, `winsorize_percentile`, `baseline_method`, `kappa_mu`, `var_b`, `missing_fraction`, `mnar_bias`
+**Key parameters:** `data_file`, `column_prefix`, `bio_strength`, `k_dir`, `variance_ratio`, `differential_mask`, `winsorize_percentile`, `baseline_method`, `kappa_mu`, `var_b`, `missing_fraction`, `mnar_bias`, `batch_mode`
 
 </details>
 
@@ -129,7 +125,7 @@ Generates two glycomic datasets (e.g., _N_- and _O_-glycomics) that share sample
 
 1. Draws independent log-normal healthy baselines `alpha_H_A` and `alpha_H_B` (fixed seeds 42/43 for reproducibility)
 2. Generates per-glycome `alpha_U` using independent seeds so biological effects are not correlated by seed reuse
-3. Simulates clean compositional data for both glycomes from their respective Dirichlet parameters
+3. Simulates clean compositional data for both glycomes via Gaussian copula, using independently constructed pooled references from `_build_copula_ref` (class-filtered by `glycan_class_A/B`)
 4. Optionally injects cross-class coupling in CLR space via shared latent factors `Z ~ N(0, I)`:
    - `Y_A_clr += coupling_strength * (Z @ U_A.T) * sigma_A`
    - `Y_B_clr += coupling_strength * (Z @ U_B.T) * sigma_B`
@@ -152,7 +148,7 @@ The [use_cases/batch_correction/](use_cases/batch_correction) directory demonstr
 
 ## Limitation
 
-**Two biological groups only**: Current implementation targets healthy/unhealthy setup. Supporting multi-stage disease (≥3 groups) requires refactoring Dirichlet parameter generation and evaluation metrics.
+**Two biological groups only**: Current implementation targets healthy/unhealthy setup. Supporting multi-stage disease (≥3 groups) requires refactoring parameter generation and evaluation metrics.
 
 ## Citation
 
