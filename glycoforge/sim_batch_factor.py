@@ -160,13 +160,18 @@ def apply_batch_effect(Y_clean # (samples x glycans) clean CLR matrix
         u_b = u_dict[b]
         # mean shift term
         if batch_mode == "multiplicative":
-            mean_shift = kappa_mu * u_b * Y_with_batch_clr[i, :]
+            gain = np.exp(kappa_mu * u_b) - 1.0
+            mean_shift = gain * Y_with_batch_clr[i, :]
         else:
             mean_shift = kappa_mu * sigma * u_b
         # variance inflation (batch-specific scale)
         if var_b > 0:
             var_scale = batch_var_scales[b]
-            var_scalar = rng.normal(loc = 0.0, scale = np.sqrt(var_scale) * sigma, size = n_glycans)
+            if batch_mode == "multiplicative":
+                noise_scale = np.sqrt(var_scale) * np.maximum(np.abs(Y_with_batch_clr[i, :]), sigma * 0.1)
+            else:
+                noise_scale = np.sqrt(var_scale) * sigma
+            var_scalar = rng.normal(loc = 0.0, scale = noise_scale, size = n_glycans)
             if b in compositional_pairs:
                 pairs = compositional_pairs[b]
                 for sub_idx, prod_idx in zip(pairs['substrates'], pairs['products']):
