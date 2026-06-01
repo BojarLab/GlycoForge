@@ -1,5 +1,6 @@
 from glycowork.glycan_data.loader import glycomics_data_loader as _gcl
 from glycowork.motif.analysis import get_differential_expression
+from glycowork.motif.graph import subgraph_isomorphism
 import numpy as np
 import pandas as pd
 import os
@@ -7,6 +8,7 @@ import json
 import warnings
 import contextlib
 import io
+import matplotlib.pyplot as plt
 from sklearn.covariance import LedoitWolf
 from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_bio_injection_from_real_data, define_differential_mask
 from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
@@ -1124,3 +1126,160 @@ def simulate_paired(
       'Y_B_final': Y_B_final,
     })
   return all_runs
+
+
+def glycoforge_power(
+    reference_dataset="human_serum_bacteremia_N_PMID33535571",
+    reference_df=None,
+    n_glycans=30,
+    frac_differential=0.2,
+    glycan_effects=(0.3, 0.5, 0.8, 1.2),
+    target_motif="Neu5Ac(a2-3)Gal",
+    motif_shifts=(0.3, 0.5, 0.8, 1.1),
+    sample_sizes=(3, 6, 10, 16, 25, 40),
+    n_seeds=40,
+    motif_n_seeds=20,
+    power_target=0.8,
+    ground_truth_seed=0,
+    include_glycan=True,
+    include_motif=True,
+    progress=None
+):
+    """Monte-Carlo power analysis for a glycomics study design. Returns a matplotlib
+    Figure and a tidy results DataFrame. Panel A injects a defined Cohen's d into a
+    random subset of glycans (glycan-level detection); panel B coherently regulates the
+    carriers of target_motif and tests at the motif level via glycowork's motif
+    aggregation. Bands are 95% Monte-Carlo intervals across seeds. Pass progress(done,
+    total) to receive progress callbacks during the run."""
+    ds = reference_df.copy() if reference_df is not None else getattr(_gcl, reference_dataset).copy()
+    if "glycan" not in ds.columns:
+        raise ValueError("reference_df must follow the glycowork convention: a 'glycan' column of IUPAC sequences plus numeric sample-abundance columns.")
+    ref_label = "user dataset" if reference_df is not None else reference_dataset
+    seqs_all = [str(x) for x in ds["glycan"].tolist()]
+    mat = ds.drop(columns=["glycan"]).select_dtypes("number")
+    seen, keep = set(), []
+    for i, s in enumerate(seqs_all):
+        if s not in seen:
+            seen.add(s)
+            keep.append(i)
+    seqs_all = [seqs_all[i] for i in keep]
+    mat = mat.iloc[keep].reset_index(drop=True)
+    top = mat.mean(axis = 1).nlargest(n_glycans).index.tolist()
+    n_glycans = len(top)
+    seqs = [seqs_all[i] for i in top]
+    vals = mat.iloc[top].values.T
+    vals = vals[~np.isnan(vals).any(axis=1)]
+    clr_ref = clr(vals)
+    Sigma = LedoitWolf().fit(clr_ref).covariance_
+    sd = clr_ref.std(axis=0)
+    panels = (["glycan"] if include_glycan else []) + (["motif"] if include_motif else [])
+    if not panels:
+        raise ValueError("Enable at least one of include_glycan / include_motif.")
+    carrier = None
+    if include_motif:
+        carrier = np.array([bool(subgraph_isomorphism(s, target_motif)) for s in seqs])
+        if carrier.sum() < 3:
+            raise ValueError(f"target_motif '{target_motif}' carried by only {int(carrier.sum())} glycans; pick a more common motif.")
+    total = 0
+    if include_glycan:
+        total += len(glycan_effects) * len(sample_sizes) * n_seeds
+    if include_motif:
+        total += len(motif_shifts) * len(sample_sizes) * motif_n_seeds
+    done = 0
+
+    def tick():
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(done, total)
+
+    def cols(n):
+        return [f"H{i}" for i in range(n)] + [f"U{i}" for i in range(n)]
+
+    def sim_df(n, inj, seed):
+        P, _ = simulate_clean_data(np.ones(n_glycans), np.ones(n_glycans), n, n, seed=seed, real_clr_ref=clr_ref, Sigma_lw=Sigma, injection=inj)
+        d = pd.DataFrame(P.T, columns=cols(n))
+        d.insert(0, "glycan", seqs)
+        return d
+
+    rng = np.random.default_rng(ground_truth_seed)
+    n_diff = max(2, int(frac_differential * n_glycans))
+    diff_idx = rng.choice(n_glycans, n_diff, replace=False)
+    gmask = np.zeros(n_glycans, bool)
+    gmask[diff_idx] = True
+    gsign = np.zeros(n_glycans)
+    gsign[diff_idx] = np.resize([1.0, -1.0], n_diff)
+
+    def glycan_curve(d):
+        inj = np.where(gmask, gsign * d * sd, 0.0)
+        means, sems = [], []
+        for n in sample_sizes:
+            vs = []
+            for seed in range(n_seeds):
+                df = sim_df(n, inj, seed)
+                np.random.seed(seed)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    res = get_differential_expression(df, group1=cols(n)[n:], group2=cols(n)[:n], transform="CLR", impute=True)
+                flag = dict(zip(res["Glycan"], res["significant"]))
+                sig = np.array([bool(flag.get(s, False)) for s in seqs])
+                vs.append(sig[gmask].mean())
+                tick()
+            a = np.array(vs)
+            means.append(a.mean())
+            sems.append(a.std() / np.sqrt(len(a)))
+        return np.array(means), np.array(sems)
+
+    def motif_curve(shift):
+        inj = shift * sd * carrier
+        inj = inj - inj.mean()
+        means, sems, eff = [], [], []
+        for n in sample_sizes:
+            det, es = [], []
+            for seed in range(motif_n_seeds):
+                df = sim_df(n, inj, seed)
+                np.random.seed(seed)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    res = get_differential_expression(df, group1=cols(n)[n:], group2=cols(n)[:n], motifs=True, transform="CLR", impute=True)
+                row = res[res["Glycan"] == target_motif]
+                if len(row):
+                    det.append(float(row["significant"].iloc[0]))
+                    es.append(abs(float(row["Effect size"].iloc[0])))
+                tick()
+            a = np.array(det)
+            means.append(a.mean())
+            sems.append(a.std() / np.sqrt(len(a)))
+            eff.append(np.mean(es) if es else np.nan)
+        return np.array(means), np.array(sems), eff[-1]
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(6.5 * len(panels), 5.2), sharey=len(panels) > 1, squeeze=False)
+    axes = axes[0]
+    x = np.array(sample_sizes)
+    rows = []
+    for ax, panel in zip(axes, panels):
+        if panel == "glycan":
+            for d in glycan_effects:
+                m, se = glycan_curve(d)
+                lo, hi = np.clip(m - 1.96 * se, 0, 1), np.clip(m + 1.96 * se, 0, 1)
+                ln, = ax.plot(x, m, marker="o", label=f"d = {d}")
+                ax.fill_between(x, lo, hi, alpha=0.18, color=ln.get_color())
+                for n, p, l, h in zip(sample_sizes, m, lo, hi):
+                    rows.append({"level": "glycan", "effect": f"d={d}", "n_per_group": n, "power": p, "ci_low": l, "ci_high": h})
+            ax.set_title(f"(A) Glycan-level detection\n{n_diff}/{n_glycans} glycans truly differential")
+        else:
+            for shift in motif_shifts:
+                m, se, realized = motif_curve(shift)
+                lo, hi = np.clip(m - 1.96 * se, 0, 1), np.clip(m + 1.96 * se, 0, 1)
+                ln, = ax.plot(x, m, marker="s", label=f"d \u2248 {realized:.2f}")
+                ax.fill_between(x, lo, hi, alpha=0.18, color=ln.get_color())
+                for n, p, l, h in zip(sample_sizes, m, lo, hi):
+                    rows.append({"level": "motif", "effect": f"d~{realized:.2f}", "n_per_group": n, "power": p, "ci_low": l, "ci_high": h})
+            ax.set_title(f"(B) Motif-level detection\ntarget: {target_motif} ({int(carrier.sum())}/{n_glycans} carriers)")
+        ax.axhline(power_target, ls="--", c="grey", lw=1)
+        ax.set_xlabel("Samples per group (n_H = n_U)")
+        ax.set_ylim(0, 1.02)
+        ax.grid(alpha=0.3)
+        ax.legend(title="Effect size (Cohen's d)")
+    axes[0].set_ylabel("Power")
+    fig.suptitle(f"GlycoForge power analysis. Reference: {ref_label}", y=1.02)
+    fig.tight_layout()
+    return fig, pd.DataFrame(rows)

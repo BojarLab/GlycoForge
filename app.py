@@ -129,8 +129,107 @@ def _run_paired(params, out_dir):
 st.sidebar.title("⚒️ GlycoForge")
 st.sidebar.markdown("Configure your simulation below, then click **Run**.")
 
-sim_type = st.sidebar.radio("Simulation type", ["Single glycome", "Paired glycomes"], horizontal=True)
+sim_type = st.sidebar.radio("Simulation type", ["Single glycome", "Paired glycomes", "Power analysis"], horizontal=True)
 is_paired = (sim_type == "Paired glycomes")
+if sim_type == "Power analysis":
+  st.title("GlycoForge power analysis")
+  st.caption("Estimate statistical power to detect glycan- and motif-level differences as a function of sample size, calibrated to a real reference glycome.")
+  st.sidebar.divider()
+  st.sidebar.subheader("Reference glycome")
+  pa_source = st.sidebar.radio("Reference source", ["glycowork dataset", "Upload CSV"], horizontal = True)
+  pa_reference = "human_serum_bacteremia_N_PMID33535571"
+  pa_reference_df = None
+  if pa_source == "glycowork dataset":
+    pa_reference = st.sidebar.text_input("glycowork dataset", value = "human_serum_bacteremia_N_PMID33535571",
+                                         help = "Any glycomics_data_loader dataset; supplies realistic within-study CLR marginals and covariance.")
+  else:
+    pa_ref_file = st.sidebar.file_uploader("Reference glycomics CSV", type = ["csv"], key = "pa_ref_csv",
+                                           help = "First column 'glycan' with IUPAC sequences; all other columns are numeric sample abundances (glycowork convention).")
+    if pa_ref_file is not None:
+      pa_reference_df = pd.read_csv(pa_ref_file)
+  pa_n_glycans = st.sidebar.number_input("# glycans", min_value = 5, max_value = 200, value = 30, step = 5)
+  pa_sizes_str = st.sidebar.text_input("samples per group (comma-separated)", value="3, 6, 10, 16, 25, 40")
+  st.sidebar.subheader("Glycan-level panel")
+  pa_include_glycan = st.sidebar.checkbox("Include glycan-level panel", value=True)
+  pa_frac = st.sidebar.slider("fraction of glycans differential", 0.05, 0.6, 0.2, 0.05)
+  pa_glycan_eff_str = st.sidebar.text_input("glycan effect sizes (Cohen's d)", value="0.3, 0.5, 0.8, 1.2")
+  pa_n_seeds = st.sidebar.slider("simulations per point (glycan)", 5, 100, 40, 5)
+  st.sidebar.subheader("Motif-level panel")
+  pa_include_motif = st.sidebar.checkbox("Include motif-level panel (slower)", value=True)
+  pa_target_motif = st.sidebar.text_input("target motif", value="Neu5Ac(a2-3)Gal",
+    help="IUPAC-condensed motif whose carrier glycans are coherently regulated, e.g. Fuc, Neu5Ac, Gal(b1-4)GlcNAc.")
+  pa_motif_shift_str = st.sidebar.text_input("motif carrier shifts (CLR-SD units)", value="0.3, 0.5, 0.8, 1.1")
+  pa_motif_n_seeds = st.sidebar.slider("simulations per point (motif)", 5, 60, 20, 5)
+  pa_ground_truth_seed = st.sidebar.number_input("ground-truth seed", value=0, step=1)
+  pa_run = st.sidebar.button("▶  Run power analysis", type="primary", width='stretch')
+
+  def _parse_floats(text, fallback):
+    try:
+      out = tuple(float(v.strip()) for v in text.split(",") if v.strip())
+      return out if out else fallback
+    except ValueError:
+      return fallback
+
+  def _parse_ints(text, fallback):
+    try:
+      out = tuple(int(float(v.strip())) for v in text.split(",") if v.strip())
+      return out if out else fallback
+    except ValueError:
+      return fallback
+
+  if not pa_run:
+    st.info("Configure the analysis in the sidebar and click **Run power analysis**. The motif-level panel is the slow part (glycowork re-quantifies motifs on every simulation); lower its simulations-per-point or disable it for a quick look.")
+    st.stop()
+  if not pa_include_glycan and not pa_include_motif:
+    st.error("Enable at least one panel.")
+    st.stop()
+  if pa_source == "Upload CSV" and pa_reference_df is None:
+    st.error("Please upload a reference glycomics CSV.")
+    st.stop()
+  from glycoforge.pipeline import glycoforge_power
+  bar = st.progress(0.0, text="Running simulations…")
+  def _on_progress(d, t):
+    bar.progress(min(d / t, 1.0), text=f"Simulation {d} / {t}")
+  with st.spinner("Running power analysis…"):
+    try:
+      fig, results = glycoforge_power(
+        reference_dataset = pa_reference,
+        reference_df = pa_reference_df,
+        n_glycans = int(pa_n_glycans),
+        frac_differential=float(pa_frac),
+        glycan_effects=_parse_floats(pa_glycan_eff_str, (0.3, 0.5, 0.8, 1.2)),
+        target_motif=pa_target_motif,
+        motif_shifts=_parse_floats(pa_motif_shift_str, (0.3, 0.5, 0.8, 1.1)),
+        sample_sizes=_parse_ints(pa_sizes_str, (3, 6, 10, 16, 25, 40)),
+        n_seeds=int(pa_n_seeds),
+        motif_n_seeds=int(pa_motif_n_seeds),
+        ground_truth_seed=int(pa_ground_truth_seed),
+        include_glycan=pa_include_glycan,
+        include_motif=pa_include_motif,
+        progress=_on_progress
+      )
+    except Exception as e:
+      bar.empty()
+      st.error(f"Power analysis failed: {e}")
+      with st.expander("Full traceback"):
+        import traceback
+        st.code(traceback.format_exc())
+      st.stop()
+  bar.empty()
+  st.pyplot(fig, width='content')
+  st.subheader("Sample size for 80% power")
+  summary = []
+  for (lvl, eff), grp in results.groupby(["level", "effect"]):
+    hit = grp[grp.power >= 0.8].sort_values("n_per_group")
+    need = int(hit.n_per_group.iloc[0]) if len(hit) else None
+    summary.append({"level": lvl, "effect size": eff,
+                    "n per group for 80% power": str(need) if need is not None else "> max scanned"})
+  st.dataframe(pd.DataFrame(summary), width='content', hide_index=True)
+  st.subheader("Full results")
+  st.dataframe(results.round(3), width='stretch', hide_index=True)
+  st.download_button("⬇ Download results CSV", data=results.to_csv(index=False).encode(),
+    file_name="glycoforge_power.csv", mime="text/csv", width='stretch')
+  st.stop()
 
 # ── Data source (single mode only; paired is always synthetic) ────────────────
 uploaded_file = None
@@ -261,7 +360,7 @@ except ValueError:
   st.sidebar.warning("Could not parse seeds; using [42]")
 verbose = st.sidebar.checkbox("Verbose logging", value=True)
 
-run_btn = st.sidebar.button("▶  Run simulation", type="primary", use_container_width=True)
+run_btn = st.sidebar.button("▶  Run simulation", type="primary", width='stretch')
 
 # ── Main area ─────────────────────────────────────────────────────────────────
 st.title("GlycoForge simulation")
@@ -321,23 +420,23 @@ with tempfile.TemporaryDirectory() as tmp_dir:
       col_a, col_b = st.columns(2)
       with col_a:
         st.subheader("Glycome A — Clean")
-        st.pyplot(_pca_fig(run0["Y_A_clean_clr"], bio_groups, title="A clean CLR"), use_container_width=False)
+        st.pyplot(_pca_fig(run0["Y_A_clean_clr"], bio_groups, title="A clean CLR"), width='content')
         st.subheader("Glycome A — Final")
-        st.pyplot(_pca_fig(run0["Y_A_final"], bio_groups, batch_groups, title="A final CLR"), use_container_width=False)
+        st.pyplot(_pca_fig(run0["Y_A_final"], bio_groups, batch_groups, title="A final CLR"), width='content')
       with col_b:
         st.subheader("Glycome B — Clean")
-        st.pyplot(_pca_fig(run0["Y_B_clean_clr"], bio_groups, title="B clean CLR"), use_container_width=False)
+        st.pyplot(_pca_fig(run0["Y_B_clean_clr"], bio_groups, title="B clean CLR"), width='content')
         st.subheader("Glycome B — Final")
-        st.pyplot(_pca_fig(run0["Y_B_final"], bio_groups, batch_groups, title="B final CLR"), use_container_width=False)
+        st.pyplot(_pca_fig(run0["Y_B_final"], bio_groups, batch_groups, title="B final CLR"), width='content')
     with tab_data:
       st.subheader("Preview: Glycome A clean")
-      st.dataframe(run0["Y_A_clean"].head(10).round(4), use_container_width=True)
+      st.dataframe(run0["Y_A_clean"].head(10).round(4), width='stretch')
       st.subheader("Preview: Glycome B clean")
-      st.dataframe(run0["Y_B_clean"].head(10).round(4), use_container_width=True)
+      st.dataframe(run0["Y_B_clean"].head(10).round(4), width='stretch')
       st.subheader("Download all outputs")
       zip_bytes = _zip_dir(tmp_dir)
       st.download_button(label="⬇ Download ZIP", data=zip_bytes,
-        file_name=f"glycoforge_paired_seed{seed}.zip", mime="application/zip", use_container_width=True)
+        file_name=f"glycoforge_paired_seed{seed}.zip", mime="application/zip", width='stretch')
       st.subheader("Metadata JSON")
       meta_display = {k: v for k, v in run0.items() if not isinstance(v, pd.DataFrame)}
       with st.expander("Show metadata"):
@@ -415,15 +514,15 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     with tab_pca:
       st.subheader("Clean data (before batch effects)")
       if Y_clean_clr is not None:
-        st.pyplot(_pca_fig(Y_clean_clr, bio_groups, title="Clean CLR"), use_container_width=False)
+        st.pyplot(_pca_fig(Y_clean_clr, bio_groups, title="Clean CLR"), width='content')
       st.subheader("After batch effect injection")
       if Y_batch_clr is not None:
         st.pyplot(_pca_fig(Y_batch_clr, bio_groups, batch_groups, title="Batch CLR"),
-                  use_container_width=False)
+                  width='content')
       if Y_missing_clr is not None:
         st.subheader("After batch + missingness")
         st.pyplot(_pca_fig(Y_missing_clr, bio_groups, batch_groups, title="Missing CLR"),
-                  use_container_width=False)
+                  width='content')
     with tab_metrics:
       st.subheader("Biological signal quality")
       bio_eff = bio_check_clean.get("bio_effect", {})
@@ -435,7 +534,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
       if pvca:
         col_a, col_b = st.columns([1.2, 1])
         with col_a:
-          st.pyplot(_pvca_bar(pvca), use_container_width=False)
+          st.pyplot(_pvca_bar(pvca), width='content')
         with col_b:
           severity = overall.get("severity", "—")
           colour = {"NONE":"🟢","GOOD":"🟢","MILD":"🟡",
@@ -459,18 +558,18 @@ with tempfile.TemporaryDirectory() as tmp_dir:
           st.markdown("**Missing rate by intensity bin:**")
           mnar_df = pd.DataFrame({"Intensity bin": list(mnar_by_int.keys()),
                                   "Missing rate": [f"{v:.1%}" for v in mnar_by_int.values()]})
-          st.dataframe(mnar_df, hide_index=True, use_container_width=False)
+          st.dataframe(mnar_df, hide_index=True, width='content')
     with tab_data:
       st.subheader("Preview: clean data (first seed)")
       if Y_clean is not None:
-        st.dataframe(Y_clean.head(10).round(4), use_container_width=True)
+        st.dataframe(Y_clean.head(10).round(4), width='stretch')
       st.subheader("Preview: post-batch data")
       if Y_batch is not None:
-        st.dataframe(Y_batch.head(10).round(4), use_container_width=True)
+        st.dataframe(Y_batch.head(10).round(4), width='stretch')
       st.subheader("Download all outputs")
       zip_bytes = _zip_dir(tmp_dir)
       st.download_button(label="⬇ Download ZIP (all CSVs + metadata)", data=zip_bytes,
-        file_name=f"glycoforge_seed{seed}.zip", mime="application/zip", use_container_width=True)
+        file_name=f"glycoforge_seed{seed}.zip", mime="application/zip", width='stretch')
       st.subheader("Metadata JSON")
       with st.expander("Show metadata"):
         st.json(meta)
