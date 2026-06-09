@@ -1128,6 +1128,146 @@ def simulate_paired(
   return all_runs
 
 
+def simulate_circadian(data_file=None, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], reps=None, cum_seq=None, q_thresh=0.05,
+                       amp_scale=2.0, sim_zt_seq=None, sim_reps=None, sim_cum_seq=None, n_batches=3, kappa_mu=1.0,
+                       var_b=0.5, affected_fraction=(0.05, 1), positive_prob=0.6, overlap_prob=0.5,
+                       batch_motif_rules=None, batch_motif_bias=0.8, batch_mode="additive", missing_fraction=0.0,
+                       mnar_bias=1.0, random_seeds=[42], output_dir="results/circadian/", verbose=False, save_csv=True):
+    """Simulate circadian glycomics data grounded on a real time-course dataset.
+
+    Fits per-glycan cosinor rhythms and the arrhythmic residual backbone from data_file
+    (define_circadian_injection_from_real_data), then generates synthetic samples by an
+    empirical-marginal Gaussian copula on the residuals (the copula_emp model, the winner of
+    the model bake-off on detection-yield calibration and amplitude fidelity) with the fitted
+    cosinor mean curve injected in CLR space and scaled by amp_scale. Clean compositions are
+    then pushed through the standard GlycoForge subsystem: batch direction vectors, batch
+    effects, and MNAR missingness, with batches stratified across ZT phases so the batch
+    factor is orthogonal to the rhythm. Outputs match simulate/simulate_paired conventions.
+
+    Parameters
+    ----------
+    data_file : str
+        Path to a glycan x sample CSV (sample columns named T{n}_ZT{zt}_R{rep}) or a glycowork
+        dataset name. Required.
+    zt_seq, reps, cum_seq : list or None
+        The real data's design used for fitting: ZT phase, replicate count, and cumulative
+        hours per timepoint. reps/cum_seq default to 5 replicates and 6 h spacing.
+    q_thresh : float
+        fdr_tsbh q cutoff defining the ground-truth rhythmic glycan set.
+    amp_scale : float
+        Multiplier on the injected cosinor amplitude (default 2.0, calibrated so the simulated
+        detection yield matches the real study).
+    sim_zt_seq, sim_reps, sim_cum_seq : list or None
+        Design of the simulated study; default to the fitted design. Vary these (e.g. more
+        replicates or denser sampling) for power analysis.
+    n_batches, kappa_mu, var_b, affected_fraction, positive_prob, overlap_prob, batch_motif_rules, batch_motif_bias, batch_mode :
+        Batch-effect parameters, passed to define_batch_direction and apply_batch_effect.
+    missing_fraction, mnar_bias : float
+        MNAR missingness parameters, passed to apply_mnar_missingness.
+    random_seeds : list of int
+        One run per seed.
+    output_dir : str
+    verbose, save_csv : bool
+
+    Returns
+    -------
+    list of dict, one per seed. Each holds the run metadata (design, batch assignment,
+    ground-truth rhythmic mask, amplitude, acrophase_ZT, missingness diagnostics) plus
+    Y_clean, Y_clean_clr (compositional and CLR clean data, glycans x samples), Y_final
+    (CLR after batch effects and missingness), and the cum/zt vectors.
+    """
+    from scipy.stats import norm
+    from glycoforge.sim_circadian import define_circadian_injection_from_real_data
+    if data_file is None:
+        raise ValueError("data_file is required: a path to a glycan x sample CSV, or a glycowork dataset name.")
+    # ── Fit cosinor + residual backbone from the real data ─────────────────
+    params = define_circadian_injection_from_real_data(data_file, zt_seq=zt_seq, reps=reps, cum_seq=cum_seq, q_thresh=q_thresh)
+    glycans = list(params["glycans"])
+    n_glycans = len(glycans)
+    period = params["period"]
+    omega = 2 * np.pi / period
+    M, cos_c, sin_c = params["mesor"], params["cos_coef"], params["sin_coef"]
+    R, cov = params["residuals"], params["cov"]
+    sim_zt_seq = sim_zt_seq if sim_zt_seq is not None else zt_seq
+    sim_reps = sim_reps if sim_reps is not None else (reps if reps is not None else [5] * len(sim_zt_seq))
+    sim_cum_seq = sim_cum_seq if sim_cum_seq is not None else (cum_seq if cum_seq is not None else [i * 6.0 for i in range(len(sim_zt_seq))])
+    cum = np.concatenate([np.full(r, sim_cum_seq[i]) for i, r in enumerate(sim_reps)])
+    zt = np.concatenate([np.full(r, sim_zt_seq[i]) for i, r in enumerate(sim_reps)])
+    N = len(cum)
+    cols = []
+    for i, r in enumerate(sim_reps):
+        for j in range(r):
+            cols.append(f"T{len(cols) + 1}_ZT{int(sim_zt_seq[i])}_R{j + 1}")
+    # ── Copula correlation factor ──────────────
+    std = np.sqrt(np.clip(np.diag(cov), 1e-12, None))
+    C = cov / np.outer(std, std)
+    jit = 1e-8
+    while True:
+        try:
+            L = np.linalg.cholesky(C + jit * np.eye(n_glycans))
+            break
+        except np.linalg.LinAlgError:
+            jit *= 10
+    os.makedirs(output_dir, exist_ok=True)
+    all_runs = []
+    for seed in random_seeds:
+        rng = np.random.default_rng(seed)
+        # ── Clean data: empirical-marginal Gaussian copula + cosinor injection ──
+        U = np.clip(norm.cdf(rng.standard_normal((N, n_glycans)) @ L.T), 1e-6, 1 - 1e-6)
+        res = np.empty((N, n_glycans))
+        for g in range(n_glycans):
+            res[:, g] = np.quantile(R[:, g], U[:, g])
+        clr_clean = amp_scale * (cos_c[None, :] * np.cos(omega * cum)[:, None] + sin_c[None, :] * np.sin(omega * cum)[:, None]) + M[None, :] + res
+        comp = np.exp(clr_clean)
+        comp = comp / comp.sum(axis=1, keepdims=True) * 100
+        Y_clean = pd.DataFrame(comp.T, index=glycans, columns=cols)
+        Y_clean.index.name = "glycan"
+        Y_clean_clr = pd.DataFrame(clr(Y_clean.values.T).T, index=glycans, columns=cols)
+        # ── Phase-stratified batches so batch is orthogonal to ZT ──────────
+        batch_labels = np.empty(N, dtype=int)
+        for phase in np.unique(cum):
+            members = np.where(cum == phase)[0]
+            rng.shuffle(members)
+            batch_labels[members] = np.arange(len(members)) % n_batches
+        batch_groups = {b: [cols[k] for k in range(N) if batch_labels[k] == b] for b in range(n_batches)}
+        # ── Batch effects + missingness via existing GlycoForge subsystem ──
+        u_dict, _ = define_batch_direction(
+            batch_effect_direction=None, n_glycans=n_glycans, n_batches=n_batches, affected_fraction=affected_fraction,
+            positive_prob=positive_prob, overlap_prob=overlap_prob, verbose=verbose, glycan_sequences=glycans,
+            batch_motif_rules=batch_motif_rules, motif_bias=batch_motif_bias)
+        sigma = estimate_sigma(Y_clean_clr)
+        Y_batch_clr_T, Y_batch_T = apply_batch_effect(
+            Y_clean=Y_clean_clr.T.values, batch_labels=batch_labels, u_dict=u_dict, sigma=sigma, kappa_mu=kappa_mu,
+            var_b=var_b, seed=seed, batch_motif_rules=batch_motif_rules, glycan_sequences=glycans, batch_mode=batch_mode)
+        Y_batch_clr = pd.DataFrame(Y_batch_clr_T.T, index=glycans, columns=cols)
+        Y_batch = pd.DataFrame(Y_batch_T.T, index=glycans, columns=cols)
+        Y_missing, Y_missing_clr, _, missing_diag = apply_mnar_missingness(
+            Y_batch, missing_fraction=missing_fraction, mnar_bias=mnar_bias, seed=seed, verbose=verbose)
+        Y_final = Y_missing_clr if missing_fraction > 0 else Y_batch_clr
+        if save_csv:
+            Y_clean.to_csv(f"{output_dir}/1_clean_seed{seed}.csv", float_format="%.32f")
+            Y_clean_clr.to_csv(f"{output_dir}/1_clean_clr_seed{seed}.csv", float_format="%.32f")
+            Y_batch.to_csv(f"{output_dir}/2_batch_seed{seed}.csv", float_format="%.32f")
+            Y_batch_clr.to_csv(f"{output_dir}/2_batch_clr_seed{seed}.csv", float_format="%.32f")
+            if missing_fraction > 0:
+                Y_missing.to_csv(f"{output_dir}/3_missing_seed{seed}.csv", float_format="%.32f")
+        run_meta = {
+            "seed": seed, "n_glycans": n_glycans, "n_samples": N, "period": period, "amp_scale": amp_scale,
+            "sim_zt_seq": list(sim_zt_seq), "sim_reps": list(sim_reps), "sim_cum_seq": list(sim_cum_seq),
+            "cum": cum.tolist(), "zt": zt.tolist(), "batch_labels": batch_labels.tolist(),
+            "batch_groups": {int(k): v for k, v in batch_groups.items()}, "rhythmic": params["rhythmic"].tolist(),
+            "amplitude": params["amplitude"].tolist(), "acrophase_ZT": params["acrophase_ZT"].tolist(),
+            "n_batches": n_batches, "kappa_mu": kappa_mu, "var_b": var_b, "batch_mode": batch_mode,
+            "missing_fraction": missing_fraction, "mnar_bias": mnar_bias, "missingness": missing_diag,
+            "affected_fraction": list(affected_fraction) if isinstance(affected_fraction, tuple) else affected_fraction}
+        with open(f"{output_dir}/metadata_seed{seed}.json", "w") as f:
+            json.dump(run_meta, f, indent=2)
+        if verbose:
+            print(f"[circadian] seed {seed}: {N} samples, {int(params['rhythmic'].sum())} ground-truth rhythmic glycans -> {output_dir}")
+        all_runs.append({**run_meta, "Y_clean": Y_clean, "Y_clean_clr": Y_clean_clr, "Y_final": Y_final, "cum": cum, "zt": zt})
+    return all_runs
+
+
 def glycoforge_power(
     reference_dataset="human_serum_bacteremia_N_PMID33535571",
     reference_df=None,
