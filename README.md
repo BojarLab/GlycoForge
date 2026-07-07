@@ -14,14 +14,14 @@
 
 ### Installation
 
-* **Python 3.10–3.12 required** (`>=3.10,<3.13`). We recommend creating a dedicated virtual environment:
+* **Python 3.11–3.13 required** (`>=3.11,<3.14`). We recommend creating a dedicated virtual environment:
 
 ```bash
 python3.10 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```
 
-* Core dependency: `glycowork>=1.8.0`
+* Core dependency: `glycowork>=1.9.0`
 
 ```bash
 pip install glycoforge
