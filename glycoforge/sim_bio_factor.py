@@ -368,15 +368,18 @@ def calibrate_pair_corr(pair_corr,
     n_real = real_clr_ref.shape[0]
     pc_cal = pair_corr
     for _ in range(passes):
-        R_c = R_base.copy()
+        R0_c = R_base.copy()
+        R_tgt_c = R_base.copy()
         for i, j, r in pc_cal:
-            R_c[i, j] = r
-            R_c[j, i] = r
-        w_c, V_c = np.linalg.eigh(R_c)
-        R_c = V_c @ np.diag(np.clip(w_c, 1e-4, None)) @ V_c.T
-        d_c = np.sqrt(np.diag(R_c))
-        R_c = R_c / np.outer(d_c, d_c)
-        np.fill_diagonal(R_c, 1.0)
+            R_tgt_c[i, j] = r
+            R_tgt_c[j, i] = r
+        gamma = 1.0
+        while gamma > 0.0:
+            R_c = R0_c + gamma * (R_tgt_c - R0_c)
+            np.fill_diagonal(R_c, 1.0)
+            if float(np.linalg.eigvalsh(R_c)[0]) >= 1e-4:
+                break
+            gamma -= 0.05
         Z_c = np.random.default_rng(seed).multivariate_normal(np.zeros(n_glycans), R_c + eps * np.eye(n_glycans), size=n_draw)
         U_c = sp_norm.cdf(Z_c)
         fi_c = U_c * (n_real - 1)
@@ -438,14 +441,18 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   np.fill_diagonal(R, 1.0)
   eps = max(1e-8, 1e-4 * n_glycans)
   if pair_corr is not None:
+      R0 = R.copy()
+      R_tgt = R.copy()
       for i, j, r in pair_corr:
-          R[i, j] = r
-          R[j, i] = r
-      w, V = np.linalg.eigh(R)
-      R = V @ np.diag(np.clip(w, 1e-4, None)) @ V.T
-      d = np.sqrt(np.diag(R))
-      R = R / np.outer(d, d)
-      np.fill_diagonal(R, 1.0)
+          R_tgt[i, j] = r
+          R_tgt[j, i] = r
+      gamma = 1.0
+      while gamma > 0.0:
+          R = R0 + gamma * (R_tgt - R0)
+          np.fill_diagonal(R, 1.0)
+          if float(np.linalg.eigvalsh(R)[0]) >= 1e-4:
+              break
+          gamma -= 0.05
   R_reg = R + eps * np.eye(n_glycans)
   # Step 2: Sample Z ~ N(0, R) — preserves LW inter-feature correlation structure
   Z = rng.multivariate_normal(np.zeros(n_glycans), R_reg, size=n_H + n_U)

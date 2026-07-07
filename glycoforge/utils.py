@@ -222,26 +222,6 @@ def _parse_batch_effect_direction(bed_config, affected_fraction, positive_prob, 
     return manual_config, auto_params
 
 
-def load_data_from_glycowork(data_file):
-    if os.path.exists(data_file):
-        return pd.read_csv(data_file)
-    # Try loading from glycowork internal datasets
-    try:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
-            import pkg_resources
-            glycowork_path = pkg_resources.resource_filename('glycowork', 'glycan_data')
-        # Add .csv extension if not present
-        dataset_name = data_file if data_file.endswith('.csv') else f"{data_file}.csv"
-        full_path = os.path.join(glycowork_path, dataset_name)
-        if os.path.exists(full_path):
-            return pd.read_csv(full_path)
-    except Exception:
-        pass
-    # If all fails, try as regular path (will raise clear error message)
-    return pd.read_csv(data_file)
-
 def clr(x, eps=1e-6):
     """Centered log-ratio transformation for compositional data.
     Parameters:

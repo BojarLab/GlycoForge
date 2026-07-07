@@ -1,4 +1,4 @@
-from glycowork.glycan_data.loader import glycomics_data_loader as _gcl
+from glycowork.glycan_data.loader import glycomics_data_loader as _gcl, glycomics_data_loader
 from glycowork.motif.analysis import get_differential_expression
 from glycowork.motif.graph import subgraph_isomorphism
 import numpy as np
@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from sklearn.covariance import LedoitWolf
 from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_bio_injection_from_real_data, define_differential_mask, calibrate_pair_corr
 from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
-from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness, find_compositional_pairs
+from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, apply_mnar_missingness, find_compositional_pairs
 
 
 def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
@@ -268,7 +268,10 @@ def simulate(
             if _class_tag:
                 print(f"[Synthetic] Glycan class filter: {_class_tag}")
     elif data_source == "real":
-        df = load_data_from_glycowork(data_file)
+        try:
+            df = glycomics_data_loader.data_file
+        except:
+            df = pd.read_csv(data_file)
         if glycan_sequences is None and 'glycan' in df.columns:
             glycan_sequences = df['glycan'].tolist()
         # Get column prefixes (with defaults)

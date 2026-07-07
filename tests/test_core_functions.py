@@ -11,7 +11,7 @@ from glycoforge.sim_bio_factor import (
     define_bio_injection_from_real_data
 )
 from glycoforge.sim_batch_factor import apply_batch_effect, define_batch_direction
-
+from glycowork.glycan_data.loader import glycomics_data_loader
 
 
 def test_clr_transform():
@@ -241,10 +241,9 @@ def test_motif_based_alpha_generation():
     3. substrate-product pairing relationships are preserved
     4. motif_bias parameter affects selection probability
     """
-    from glycoforge.utils import load_data_from_glycowork
 
     try:
-        df = load_data_from_glycowork("glycomics_human_leukemia_O_PMID34646384.csv")
+        df = glycomics_data_loader.human_leukemia_O_PMID34646384
         # Glycan sequences are in the first column (or index if set_index was used)
         if df.index.dtype == 'object' and isinstance(df.index[0], str):
             glycan_sequences = df.index.tolist()[:20]
@@ -320,11 +319,11 @@ def test_compositional_pairing():
     3. Unpaired glycans are categorized correctly
     4. Both network-based and string-matching fallback work
     """
-    from glycoforge.utils import find_compositional_pairs, load_data_from_glycowork
+    from glycoforge.utils import find_compositional_pairs
     
     # Load real glycan data
     try:
-        df = load_data_from_glycowork("glycomics_human_leukemia_O_PMID34646384.csv")
+        df = glycomics_data_loader.human_leukemia_O_PMID34646384
         # Glycan sequences are in the first column (or index if set_index was used)
         if df.index.dtype == 'object' and isinstance(df.index[0], str):
             glycan_sequences = df.index.tolist()[:30]
@@ -383,12 +382,11 @@ def test_batch_motif_effects():
     3. Glycans with target motifs are preferentially affected
     4. Returned u_dict direction vectors are valid
     """
-    from glycoforge.utils import load_data_from_glycowork
     from glycoforge.sim_batch_factor import define_batch_direction
     
     # Load real glycan data
     try:
-        df = load_data_from_glycowork("glycomics_human_leukemia_O_PMID34646384.csv")
+        df = glycomics_data_loader.human_leukemia_O_PMID34646384
         # Glycan sequences are in the first column (or index if set_index was used)
         if df.index.dtype == 'object' and isinstance(df.index[0], str):
             glycan_sequences = df.index.tolist()[:25]
@@ -471,11 +469,11 @@ def test_mnar_missingness_basic():
     4. CLR-transformed data has no NaN values
     5. diagnostics contains necessary statistics
     """
-    from glycoforge.utils import apply_mnar_missingness, load_data_from_glycowork
+    from glycoforge.utils import apply_mnar_missingness
     
     # Use real data subset for testing
     try:
-        df = load_data_from_glycowork("glycomics_human_leukemia_O_PMID34646384.csv")
+        df = glycomics_data_loader.human_leukemia_O_PMID34646384
         # Skip first column (glycan names) and get numeric data only
         numeric_cols = df.select_dtypes(include=[np.number]).columns[:10]
         Y_test = df[numeric_cols].values.T  # First 10 numeric columns, transposed
