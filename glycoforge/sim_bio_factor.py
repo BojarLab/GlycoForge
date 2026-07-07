@@ -343,10 +343,55 @@ def define_bio_injection_from_real_data(p_h, # array-like Baseline healthy distr
     return alpha_H, alpha_U, debug_info
 
 
+def calibrate_pair_corr(pair_corr,
+                        Sigma_lw,
+                        real_clr_ref,
+                        n_draw=2000,
+                        passes=2,
+                        seed=0):
+    """Inflate target substrate-product correlations to counter empirical-marginal attenuation.
+    The Gaussian copula preserves rank correlation, but grafting non-Gaussian empirical CLR
+    marginals onto the sampled uniforms compresses the achieved Pearson r below the value
+    written into the correlation matrix. This pre-samples the graft n_draw times and rescales
+    each target by a (r_target / r_achieved) fixed point over `passes` iterations, so the
+    calibrated tuples, passed to simulate_clean_data as pair_corr, yield output Pearson
+    correlations matching the requested targets. Sigma_lw and real_clr_ref must be the same
+    objects simulate_clean_data will receive. Returns calibrated (i, j, r) tuples.
+    """
+    n_glycans = Sigma_lw.shape[0]
+    std = np.sqrt(np.diag(Sigma_lw))
+    std = np.where(std < 1e-10, 1.0, std)
+    R_base = Sigma_lw / np.outer(std, std)
+    np.fill_diagonal(R_base, 1.0)
+    eps = max(1e-8, 1e-4 * n_glycans)
+    sorted_ref = np.sort(real_clr_ref, axis=0)
+    n_real = real_clr_ref.shape[0]
+    pc_cal = pair_corr
+    for _ in range(passes):
+        R_c = R_base.copy()
+        for i, j, r in pc_cal:
+            R_c[i, j] = r
+            R_c[j, i] = r
+        w_c, V_c = np.linalg.eigh(R_c)
+        R_c = V_c @ np.diag(np.clip(w_c, 1e-4, None)) @ V_c.T
+        d_c = np.sqrt(np.diag(R_c))
+        R_c = R_c / np.outer(d_c, d_c)
+        np.fill_diagonal(R_c, 1.0)
+        Z_c = np.random.default_rng(seed).multivariate_normal(np.zeros(n_glycans), R_c + eps * np.eye(n_glycans), size=n_draw)
+        U_c = sp_norm.cdf(Z_c)
+        fi_c = U_c * (n_real - 1)
+        lo_c = np.floor(fi_c).astype(int)
+        hi_c = np.minimum(lo_c + 1, n_real - 1)
+        t_c = fi_c - lo_c
+        X_c = sorted_ref[lo_c, np.arange(n_glycans)] * (1 - t_c) + sorted_ref[hi_c, np.arange(n_glycans)] * t_c
+        pc_cal = [(i, j, float(np.clip(r_tgt * r_tgt / max(abs(np.corrcoef(X_c[:, i], X_c[:, j])[0, 1]), 0.05), -0.99, 0.99))) for (i, j, r_tgt) in pair_corr]
+    return pc_cal
+
+
 def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
                         seed=None, verbose=False,
                         real_clr_ref = None, Sigma_lw = None, injection = None,
-                        bio_strength = 1.0, scale_injection = False):
+                        bio_strength = 1.0, scale_injection = False, pair_corr = None):
   """Simulate clean glycomics data via Gaussian copula. Requires real_clr_ref and Sigma_lw (Dirichlet fallback deprecated). Gaussian copula: LW correlation
   matrix defines inter-feature dependencies, empirical marginals from real_clr_ref
   define per-feature distributions, and the CLR-space injection from alpha_H/alpha_U
@@ -369,6 +414,12 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   Sigma_lw : (n_glycans, n_glycans) ndarray or None
       Ledoit-Wolf covariance from the same real data. Derive correlation matrix R
       by normalising by marginal stds.
+  pair_corr : list of (i, j, r) tuples or None
+      Target pairwise correlations written into the copula correlation matrix at
+      feature positions (i, j), then projected to the nearest PD correlation matrix.
+      Injects biosynthetic substrate-product coupling that shrinkage-regularized
+      covariance attenuates. Pre-calibrate with calibrate_pair_corr so achieved
+      output Pearson r matches the requested targets.
   Returns
   -------
   P : (n_H + n_U, n_glycans) percent-scale compositional data
@@ -386,6 +437,15 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   R = Sigma_lw / np.outer(std, std)
   np.fill_diagonal(R, 1.0)
   eps = max(1e-8, 1e-4 * n_glycans)
+  if pair_corr is not None:
+      for i, j, r in pair_corr:
+          R[i, j] = r
+          R[j, i] = r
+      w, V = np.linalg.eigh(R)
+      R = V @ np.diag(np.clip(w, 1e-4, None)) @ V.T
+      d = np.sqrt(np.diag(R))
+      R = R / np.outer(d, d)
+      np.fill_diagonal(R, 1.0)
   R_reg = R + eps * np.eye(n_glycans)
   # Step 2: Sample Z ~ N(0, R) — preserves LW inter-feature correlation structure
   Z = rng.multivariate_normal(np.zeros(n_glycans), R_reg, size=n_H + n_U)

@@ -10,9 +10,9 @@ import contextlib
 import io
 import matplotlib.pyplot as plt
 from sklearn.covariance import LedoitWolf
-from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_bio_injection_from_real_data, define_differential_mask
+from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_bio_injection_from_real_data, define_differential_mask, calibrate_pair_corr
 from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
-from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness
+from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, load_data_from_glycowork, apply_mnar_missingness, find_compositional_pairs
 
 
 def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
@@ -95,9 +95,10 @@ def simulate(
     missing_fraction=0.0,
     mnar_bias=1.0,
     glycan_sequences=None,
-    motif_rules=None,
-    motif_bias=0.8,
-    batch_motif_rules=None, # {batch_id: {motif: direction}}
+    motif_rules = None,
+    motif_bias = 0.8,
+    pair_corr_target = "auto", # None disables coupling injection; "auto" or a float sets the substrate-product target r
+    batch_motif_rules = None,  # {batch_id: {motif: direction}}
     batch_motif_bias=0.8,
     batch_mode="additive",
     random_seeds=[42],
@@ -192,6 +193,7 @@ def simulate(
                 'glycan_sequences': glycan_sequences,
                 'motif_rules': motif_rules,
                 'motif_bias': motif_bias,
+                'pair_corr_target': pair_corr_target,
                 'batch_motif_rules': batch_motif_rules,
                 'batch_motif_bias': batch_motif_bias,
                 'batch_mode': batch_mode,
@@ -452,6 +454,34 @@ def simulate(
         )
     if verbose:
         print(f"Batch direction vectors: {[len(v) for v in u_dict.values()]}")
+        # Build calibrated substrate-product correlation targets once, reused across all seeds.
+        # Injects biosynthetic coupling the shrinkage-regularized copula covariance cannot supply.
+        # Templated (real effect sizes): "auto" measures within-group r from the real CLR; a float overrides.
+        # Synthetic: pooled-by-rank reference has no glycan-identity coupling to measure, so "auto" falls back to the real-data median (~0.5)
+    pair_corr_cal = None
+    if pair_corr_target is not None and motif_rules is not None and glycan_sequences is not None:
+        _pairs_pc = find_compositional_pairs(list(glycan_sequences[:n_glycans]), motif_rules, verbose = verbose,
+                                             prefix = "PairCorr ")
+        _sp = list(zip(_pairs_pc['substrates'], _pairs_pc['products']))
+        if _sp and use_real_effect_sizes:
+            _pc_raw = []
+            for _si, _pi in _sp:
+                _rv = [v for v in [
+                    np.corrcoef(_clr_H_real[:, _si], _clr_H_real[:, _pi])[0, 1] if _clr_H_real.shape[0] > 2 else np.nan,
+                    np.corrcoef(_clr_U_real[:, _si], _clr_U_real[:, _pi])[0, 1] if _clr_U_real.shape[0] > 2 else np.nan]
+                       if not np.isnan(v)]
+                if pair_corr_target == "auto" and _rv:
+                    _pc_raw.append((_si, _pi, float(np.mean(_rv))))
+                elif pair_corr_target != "auto":
+                    _pc_raw.append((_si, _pi, float(pair_corr_target)))
+            if _pc_raw:
+                pair_corr_cal = calibrate_pair_corr(_pc_raw, Sigma_mvn, _clr_all_real)
+        elif _sp and data_source == "simulated":
+            _t = 0.5 if pair_corr_target == "auto" else float(pair_corr_target)
+            pair_corr_cal = calibrate_pair_corr([(_si, _pi, _t) for _si, _pi in _sp], _Sigma_syn, _clr_all_syn)
+        if verbose:
+            print(
+                f"[PairCorr] Injecting {0 if pair_corr_cal is None else len(pair_corr_cal)} substrate-product correlations")
     # Step 3-9: Multi-run loop
     all_runs_results = []
     for run_idx, seed in enumerate(random_seeds):
@@ -477,13 +507,15 @@ def simulate(
         # Step 3: Generate clean data
         if use_real_effect_sizes:
             P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
-                                            real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn, injection = np.array(bio_debug_info['injection']))
+                                            real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn,
+                                            injection = np.array(bio_debug_info['injection']),
+                                            pair_corr = pair_corr_cal)
         else:
             _use_scale = (alpha_U_base is None)
             P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
                                             real_clr_ref = _clr_all_syn, Sigma_lw = _Sigma_syn,
                                             injection = _injection_dir_syn, bio_strength = bio_strength,
-                                            scale_injection = _use_scale)
+                                            scale_injection = _use_scale, pair_corr = pair_corr_cal)
         if glycan_sequences is not None:
             glycan_index = glycan_sequences[:n_glycans]
             index_name = "glycan"
