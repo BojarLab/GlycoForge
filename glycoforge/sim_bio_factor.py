@@ -343,6 +343,34 @@ def define_bio_injection_from_real_data(p_h, # array-like Baseline healthy distr
     return alpha_H, alpha_U, debug_info
 
 
+def _nearest_corr_fixed(R_base, pair_corr, n_iter=100, tol=1e-8):
+    """Nearest correlation matrix to R_base with substrate-product entries pinned to targets.
+    Alternating projection (Higham 2002, with Dykstra correction) between the PSD cone and the
+    affine set of unit-diagonal matrices whose pair_corr positions equal their target r. Returns
+    the Frobenius-closest valid correlation matrix that exactly carries the injected pair
+    correlations, so non-pair bulk off-diagonals move by the minimum PSD-feasibility allows."""
+    n = R_base.shape[0]
+    Y = R_base.copy()
+    for i, j, r in pair_corr:
+        Y[i, j] = r
+        Y[j, i] = r
+    dS = np.zeros((n, n))
+    for _ in range(n_iter):
+        Rk = Y - dS
+        w, V = np.linalg.eigh((Rk + Rk.T) / 2)
+        X = (V * np.clip(w, 0.0, None)) @ V.T
+        dS = X - Rk
+        Y = X.copy()
+        np.fill_diagonal(Y, 1.0)
+        for i, j, r in pair_corr:
+            Y[i, j] = r
+            Y[j, i] = r
+        if np.max(np.abs(X - Y)) < tol:
+            break
+    w, V = np.linalg.eigh((Y + Y.T) / 2)
+    return (V * np.clip(w, 1e-8, None)) @ V.T
+
+
 def calibrate_pair_corr(pair_corr,
                         Sigma_lw,
                         real_clr_ref,
@@ -368,18 +396,7 @@ def calibrate_pair_corr(pair_corr,
     n_real = real_clr_ref.shape[0]
     pc_cal = pair_corr
     for _ in range(passes):
-        R0_c = R_base.copy()
-        R_tgt_c = R_base.copy()
-        for i, j, r in pc_cal:
-            R_tgt_c[i, j] = r
-            R_tgt_c[j, i] = r
-        gamma = 1.0
-        while gamma > 0.0:
-            R_c = R0_c + gamma * (R_tgt_c - R0_c)
-            np.fill_diagonal(R_c, 1.0)
-            if float(np.linalg.eigvalsh(R_c)[0]) >= 1e-4:
-                break
-            gamma -= 0.05
+        R_c = _nearest_corr_fixed(R_base, pc_cal)
         Z_c = np.random.default_rng(seed).multivariate_normal(np.zeros(n_glycans), R_c + eps * np.eye(n_glycans), size=n_draw)
         U_c = sp_norm.cdf(Z_c)
         fi_c = U_c * (n_real - 1)
@@ -441,18 +458,7 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   np.fill_diagonal(R, 1.0)
   eps = max(1e-8, 1e-4 * n_glycans)
   if pair_corr is not None:
-      R0 = R.copy()
-      R_tgt = R.copy()
-      for i, j, r in pair_corr:
-          R_tgt[i, j] = r
-          R_tgt[j, i] = r
-      gamma = 1.0
-      while gamma > 0.0:
-          R = R0 + gamma * (R_tgt - R0)
-          np.fill_diagonal(R, 1.0)
-          if float(np.linalg.eigvalsh(R)[0]) >= 1e-4:
-              break
-          gamma -= 0.05
+      R = _nearest_corr_fixed(R, pair_corr)
   R_reg = R + eps * np.eye(n_glycans)
   # Step 2: Sample Z ~ N(0, R) — preserves LW inter-feature correlation structure
   Z = rng.multivariate_normal(np.zeros(n_glycans), R_reg, size=n_H + n_U)
