@@ -1,4 +1,4 @@
-from glycowork.glycan_data.loader import glycomics_data_loader as _gcl, glycomics_data_loader
+from glycowork.glycan_data.loader import glycomics_data_loader
 from glycowork.motif.analysis import get_differential_expression
 from glycowork.motif.graph import subgraph_isomorphism
 import numpy as np
@@ -20,11 +20,11 @@ def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
   Mirrors the synthetic-mode pooling logic in simulate() but as a reusable helper
   for simulate_paired, which needs separate refs for glycome A and B."""
   _class_tag = {'N': '_n_', 'O': '_o_', 'GSL': '_gsl_'}.get(glycan_class)
-  _all_ds_names = [n for n in dir(_gcl) if not n.startswith('_') and isinstance(getattr(_gcl, n), pd.DataFrame)
+  _all_ds_names = [n for n in dir(glycomics_data_loader) if not n.startswith('_') and isinstance(getattr(glycomics_data_loader, n), pd.DataFrame)
                    and (_class_tag is None or _class_tag in n.lower())]
   _pooled_clr, _pooled_R, _candidates = [], [], []
   for _n in _all_ds_names:
-    _df = getattr(_gcl, _n).copy()
+    _df = getattr(glycomics_data_loader, _n).copy()
     if _n.startswith('time_series'):
       _seqs = [str(c) for c in _df.columns[1:]]
       _mat = _df.iloc[:, 1:].apply(pd.to_numeric, errors='coerce').T.reset_index(drop=True)
@@ -269,7 +269,7 @@ def simulate(
                 print(f"[Synthetic] Glycan class filter: {_class_tag}")
     elif data_source == "real":
         try:
-            df = glycomics_data_loader.data_file
+            df = getattr(glycomics_data_loader, data_file)
         except:
             df = pd.read_csv(data_file)
         if glycan_sequences is None and 'glycan' in df.columns:
@@ -290,20 +290,8 @@ def simulate(
             )
         # Get actual number of glycans from real data
         n_glycans_real = df.shape[0]
-        # Preprocess data to avoid zero-variance issues in glycowork
-        # Add tiny random noise to zero values to prevent constant imputation
-        rng = np.random.default_rng(42)
         numeric_cols = r7_cols + bm_cols
-        # Create a copy to avoid modifying original dataframe if needed elsewhere
         df_processed = df.copy()
-        # Apply jitter only to zero values
-        for col in numeric_cols:
-            zero_mask = df_processed[col] == 0
-            if zero_mask.any():
-                # Generate noise between 1e-6 and 1.1e-6
-                noise = rng.uniform(1e-6, 1.1e-6, size=zero_mask.sum())
-                df_processed.loc[zero_mask, col] = noise
-
         if verbose:
             print(f"[Real Data] Applied jitter to zero values to prevent zero-variance issues")
             print(f"[Real Data] Calling get_differential_expression with:")
@@ -337,6 +325,7 @@ def simulate(
                 for warning in w:
                     glycowork_messages.append(f"{warning.category.__name__}: {warning.message}")
         else:
+            np.random.seed(42)
             results = get_differential_expression(
                 df_processed,
                 group1=bm_cols,
@@ -349,17 +338,24 @@ def simulate(
         # Create aligned effect size array matching original glycan order
         if len(results) != n_glycans_real:
             if verbose:
-                print(f"[Real Data] Warning: get_differential_expression returned {len(results)} rows, expected {n_glycans_real}")
-                print(f"[Real Data] Aligning effect sizes using index mapping, filling missing with 0.0")
-            # Initialize with zeros for all glycans
+                print(
+                    f"[Real Data] Warning: get_differential_expression returned {len(results)} rows, expected {n_glycans_real}")
+                print(
+                    f"[Real Data] Aligning effect sizes by Glycan string against original order, filling missing with 0.0")
+            # glycowork drops and reorders glycans, so match on the 'Glycan' string column
+            # against the original df glycan order, never on integer index.
+            original_glycans = [str(g) for g in df_processed['glycan'].tolist()]
+            effect_by_glycan = dict(zip(results['Glycan'].astype(str), results['Effect size']))
+            sig_series = results['significant'] if 'significant' in results.columns else pd.Series(
+                [False] * len(results), index = results.index)
+            sig_by_glycan = dict(zip(results['Glycan'].astype(str), sig_series))
             aligned_effect_sizes = np.zeros(n_glycans_real)
-            aligned_significant = np.zeros(n_glycans_real, dtype=bool)  # Also align significant mask
-            # Map results back to original positions using DataFrame index
-            for idx, (effect_size, significant) in enumerate(zip(results['Effect size'], results.get('significant', [False] * len(results)))):
-                original_idx = results.index[idx]
-                if original_idx < n_glycans_real:
-                    aligned_effect_sizes[original_idx] = effect_size if not pd.isna(effect_size) else 0.0
-                    aligned_significant[original_idx] = significant if not pd.isna(significant) else False
+            aligned_significant = np.zeros(n_glycans_real, dtype = bool)
+            for pos, g in enumerate(original_glycans):
+                es = effect_by_glycan.get(g, 0.0)
+                aligned_effect_sizes[pos] = es if not pd.isna(es) else 0.0
+                sg = sig_by_glycan.get(g, False)
+                aligned_significant[pos] = bool(sg) if not pd.isna(sg) else False
             real_effect_sizes = aligned_effect_sizes.tolist()
             significant_mask = aligned_significant
         else:
@@ -1326,7 +1322,7 @@ def glycoforge_power(
     carriers of target_motif and tests at the motif level via glycowork's motif
     aggregation. Bands are 95% Monte-Carlo intervals across seeds. Pass progress(done,
     total) to receive progress callbacks during the run."""
-    ds = reference_df.copy() if reference_df is not None else getattr(_gcl, reference_dataset).copy()
+    ds = reference_df.copy() if reference_df is not None else getattr(glycomics_data_loader, reference_dataset).copy()
     if "glycan" not in ds.columns:
         raise ValueError("reference_df must follow the glycowork convention: a 'glycan' column of IUPAC sequences plus numeric sample-abundance columns.")
     ref_label = "user dataset" if reference_df is not None else reference_dataset
@@ -1458,3 +1454,56 @@ def glycoforge_power(
     fig.suptitle(f"GlycoForge power analysis. Reference: {ref_label}", y=1.02)
     fig.tight_layout()
     return fig, pd.DataFrame(rows)
+
+
+def glycoforge_reliability(df, healthy_prefix, unhealthy_prefix, n_glycans=None, n_seeds=200, missing_fraction=None, seed0=0, verbose=False):
+    """Data-matched null calibration for a user's own glycomics cohort. Fits the templated
+    Gaussian-copula backbone (Ledoit-Wolf covariance + empirical CLR marginals) to the uploaded
+    abundances, then simulates the user's exact design under the null (no biological difference)
+    at their observed missingness across n_seeds replicates, running glycowork's differential
+    expression on each to estimate the false-positive count their test yields by chance. Compares
+    this to the number of significant glycans in the real data, so a raw hit count becomes a
+    calibrated reliability statement given sample size, inter-glycan correlation, and missingness."""
+    r_cols = [c for c in df.columns if c.startswith(healthy_prefix)]
+    u_cols = [c for c in df.columns if c.startswith(unhealthy_prefix)]
+    if not r_cols or not u_cols:
+        raise ValueError(f"No columns matched prefixes healthy='{healthy_prefix}', unhealthy='{unhealthy_prefix}'.")
+    seqs = [str(g) for g in df["glycan"].tolist()]
+    mat = df[r_cols + u_cols].apply(pd.to_numeric, errors="coerce").values.T
+    keep_rows = ~np.isnan(mat).any(axis=1)
+    mat = mat[keep_rows]
+    glycan_idx = np.arange(mat.shape[1])
+    if n_glycans is not None and n_glycans < mat.shape[1]:
+        top = np.argsort(mat.mean(axis = 0))[-n_glycans:]
+        mat = mat[:, top]
+        seqs = [seqs[i] for i in top]
+        glycan_idx = glycan_idx[top]
+    n_glycans = mat.shape[1]
+    n_H, n_U = len(r_cols), len(u_cols)
+    clr_ref = clr(mat)
+    Sigma = LedoitWolf().fit(clr_ref).covariance_
+    if missing_fraction is None:
+        missing_fraction = float(np.mean(df[r_cols + u_cols].apply(pd.to_numeric, errors="coerce").isna().values))
+    cols = [f"H{i}" for i in range(n_H)] + [f"U{i}" for i in range(n_U)]
+    fp = np.empty(n_seeds, dtype=int)
+    for s in range(n_seeds):
+        P, _ = simulate_clean_data(np.ones(n_glycans), np.ones(n_glycans), n_H, n_U, seed=seed0 + s, real_clr_ref=clr_ref, Sigma_lw=Sigma, injection=np.zeros(n_glycans))
+        Y = pd.DataFrame(P.T, index=seqs, columns=cols)
+        if missing_fraction > 0:
+            Y, _, _, _ = apply_mnar_missingness(Y, missing_fraction=missing_fraction, seed=seed0 + s, verbose=False)
+        d = Y.reset_index()
+        d.columns = ["glycan"] + cols
+        np.random.seed(seed0 + s)
+        with contextlib.redirect_stdout(io.StringIO()):
+            res = get_differential_expression(d, group1=cols[n_H:], group2=cols[:n_H], transform="CLR", impute=True)
+        fp[s] = int(res["significant"].sum()) if "significant" in res.columns else 0
+    df_real = df.iloc[glycan_idx][["glycan"] + r_cols + u_cols]
+    np.random.seed(seed0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        real = get_differential_expression(df_real, group1 = u_cols, group2 = r_cols, transform = "CLR", impute = True)
+    n_real_sig = int(real["significant"].sum()) if "significant" in real.columns else 0
+    out = {"n_glycans": n_glycans, "n_H": n_H, "n_U": n_U, "missing_fraction": missing_fraction, "false_positive_rate": float(fp.mean() / n_glycans), "expected_false_positives": float(fp.mean()), "expected_false_positives_95": float(np.quantile(fp, 0.95)), "n_real_significant": n_real_sig, "expected_true_positives": float(max(0.0, n_real_sig - fp.mean()))}
+    if verbose:
+        print(f"[reliability] n_H={n_H} n_U={n_U} n_glycans={n_glycans} missing={missing_fraction:.1%}")
+        print(f"[reliability] real hits={n_real_sig}, expected by chance={fp.mean():.1f} (95th {np.quantile(fp, 0.95):.0f}) -> ~{out['expected_true_positives']:.1f} real")
+    return out
