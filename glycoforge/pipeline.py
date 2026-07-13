@@ -1339,7 +1339,10 @@ def glycoforge_power(
     n_glycans = len(top)
     seqs = [seqs_all[i] for i in top]
     vals = mat.iloc[top].values.T
-    vals = vals[~np.isnan(vals).any(axis=1)]
+    vals = vals[~np.isnan(vals).any(axis = 1)]
+    if vals.shape[0] < 3:
+        raise ValueError(
+            f"Reference has only {vals.shape[0]} complete samples across the top {n_glycans} glycans; need >= 3 for a stable Ledoit-Wolf covariance.")
     clr_ref = clr(vals)
     Sigma = LedoitWolf().fit(clr_ref).covariance_
     sd = clr_ref.std(axis=0)
