@@ -6,7 +6,7 @@ from scipy import stats
 from sklearn.covariance import LedoitWolf
 from statsmodels.stats.multitest import multipletests
 from glycowork.glycan_data.stats import replace_outliers_winsorization, clr_transformation, impute_and_normalize
-from glycoforge.utils import load_data_from_glycowork
+from glycowork.glycan_data.loader import glycomics_data_loader
 
 PERIOD = 24.0
 
@@ -97,7 +97,9 @@ def prep_compositional(data_file, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], reps=
     parsed timepoints), and gamma=0 CLR. drop_cum optionally removes whole timepoints by their
     cumulative hour. Returns (clr_mat, cum, df): clr_mat is features x samples with duplicate
     glycans averaged, cum is the per-sample cumulative-hour vector, df the imputed wide table."""
-    df = load_data_from_glycowork(data_file)
+    stem = re.sub(r"\.csv$", "", str(data_file)).removeprefix("glycomics_")
+    df = pd.read_csv(data_file) if os.path.exists(str(data_file)) else pd.DataFrame(
+        getattr(glycomics_data_loader, stem))
     feat = df.columns[0]
     sc = sample_columns(df)
     df = df[[feat] + sc].copy()
@@ -110,7 +112,7 @@ def prep_compositional(data_file, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], reps=
         cum, zt = cum[keep], zt[keep]
         df = df[[feat] + sc]
     df = df.loc[~(df[sc] == 0).all(axis=1)].reset_index(drop=True)
-    df = df.apply(replace_outliers_winsorization, axis=1)
+    df = replace_outliers_winsorization(df)
     df = impute_and_normalize(df, [df.columns[1:].tolist()], impute=True, min_samples=0.25, circadian=True, timepoints=zt, periods=[24])
     data = df.iloc[:, 1:].astype(float)
     data.index = df.iloc[:, 0].values

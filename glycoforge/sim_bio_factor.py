@@ -404,7 +404,15 @@ def calibrate_pair_corr(pair_corr,
         hi_c = np.minimum(lo_c + 1, n_real - 1)
         t_c = fi_c - lo_c
         X_c = sorted_ref[lo_c, np.arange(n_glycans)] * (1 - t_c) + sorted_ref[hi_c, np.arange(n_glycans)] * t_c
-        pc_cal = [(i, j, float(np.clip(r_tgt * r_tgt / max(abs(np.corrcoef(X_c[:, i], X_c[:, j])[0, 1]), 0.05), -0.99, 0.99))) for (i, j, r_tgt) in pair_corr]
+        new = []
+        for (i, j, r_cur), (_, _, r_tgt) in zip(pc_cal, pair_corr):
+            r_ach = float(np.corrcoef(X_c[:, i], X_c[:, j])[0, 1])
+            if not np.isfinite(r_ach) or r_ach * r_tgt <= 0:
+                new.append((i, j, r_cur))
+                continue
+            r_ach = max(abs(r_ach), 0.05) * np.sign(r_tgt)
+            new.append((i, j, float(np.clip(r_cur * r_tgt / r_ach, -0.99, 0.99))))
+        pc_cal = new
     return pc_cal
 
 

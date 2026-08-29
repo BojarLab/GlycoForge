@@ -17,7 +17,7 @@
 * **Python 3.11–3.13 required** (`>=3.11,<3.14`). We recommend creating a dedicated virtual environment:
 
 ```bash
-python3.10 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```
 
@@ -32,7 +32,7 @@ OR
 ```bash
 git clone https://github.com/BojarLab/GlycoForge.git
 cd GlycoForge
-python3.10 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```

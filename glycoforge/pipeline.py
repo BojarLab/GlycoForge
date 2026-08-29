@@ -4,6 +4,7 @@ from glycowork.motif.graph import subgraph_isomorphism
 import numpy as np
 import pandas as pd
 import os
+import re
 import json
 import warnings
 import contextlib
@@ -20,7 +21,7 @@ def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
   Mirrors the synthetic-mode pooling logic in simulate() but as a reusable helper
   for simulate_paired, which needs separate refs for glycome A and B."""
   _class_tag = {'N': '_n_', 'O': '_o_', 'GSL': '_gsl_'}.get(glycan_class)
-  _all_ds_names = [n for n in dir(glycomics_data_loader) if not n.startswith('_') and isinstance(getattr(glycomics_data_loader, n), pd.DataFrame)
+  _all_ds_names = [n for n in dir(glycomics_data_loader) if not n.startswith('_')
                    and (_class_tag is None or _class_tag in n.lower())]
   _pooled_clr, _pooled_R, _candidates = [], [], []
   for _n in _all_ds_names:
@@ -269,31 +270,34 @@ def simulate(
                 print(f"[Synthetic] Glycan class filter: {_class_tag}")
     elif data_source == "real":
         try:
-            df = getattr(glycomics_data_loader, data_file)
+            df = getattr(glycomics_data_loader, re.sub(r"\.csv$", "", str(data_file)).removeprefix("glycomics_"))
         except:
             df = pd.read_csv(data_file)
         if glycan_sequences is None and 'glycan' in df.columns:
             glycan_sequences = df['glycan'].tolist()
         # Get column prefixes (with defaults)
-        if column_prefix is None:
-            column_prefix = {}
-        healthy_prefix = column_prefix.get('healthy', 'R7')
-        unhealthy_prefix = column_prefix.get('unhealthy', 'BM')
-        # Find columns by prefix
-        r7_cols = [c for c in df.columns if c.startswith(healthy_prefix)]
-        bm_cols = [c for c in df.columns if c.startswith(unhealthy_prefix)]
+        if column_prefix is None and getattr(df, '_contrasts', None):
+            # glycowork ships per-dataset contrasts, so built-in datasets already know
+            # their own control/case split; group1 is the control group by file convention.
+            r7_cols, bm_cols = list(df.group1), list(df.group2)
+            healthy_prefix, unhealthy_prefix = df.group1.name, df.group2.name
+        else:
+            column_prefix = column_prefix or {}
+            healthy_prefix = column_prefix.get('healthy', 'R7')
+            unhealthy_prefix = column_prefix.get('unhealthy', 'BM')
+            r7_cols = [c for c in df.columns if c.startswith(healthy_prefix)]
+            bm_cols = [c for c in df.columns if c.startswith(unhealthy_prefix)]
         if not r7_cols or not bm_cols:
             raise ValueError(
-                f"No columns found with prefixes: healthy='{healthy_prefix}', unhealthy='{unhealthy_prefix}'. "
+                f"No columns found for healthy='{healthy_prefix}', unhealthy='{unhealthy_prefix}'. "
                 f"Available columns: {df.columns.tolist()[:10]}... "
-                f"Please check 'column_prefix' in config."
+                f"Pass 'column_prefix', or use a glycowork dataset that carries contrasts."
             )
         # Get actual number of glycans from real data
         n_glycans_real = df.shape[0]
         numeric_cols = r7_cols + bm_cols
         df_processed = df.copy()
         if verbose:
-            print(f"[Real Data] Applied jitter to zero values to prevent zero-variance issues")
             print(f"[Real Data] Calling get_differential_expression with:")
             print(f"  - group1 (disease/unhealthy): {len(bm_cols)} samples (expected: {unhealthy_prefix})")
             print(f"    → {bm_cols[:min(3, len(bm_cols))]}...")
@@ -310,13 +314,14 @@ def simulate(
             with contextlib.redirect_stdout(stdout_capture), \
                  warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                np.random.seed(42)
                 results = get_differential_expression(
                     df_processed,
-                    group1=bm_cols,
-                    group2=r7_cols,
-                    transform="CLR",
-                    impute=True
+                    group1 = bm_cols,
+                    group2 = r7_cols,
+                    transform = "CLR",
+                    impute = True,
+                    paired = False,
+                    random_state = 42
                 )
             captured_stdout = stdout_capture.getvalue().strip()
             if captured_stdout:
@@ -325,13 +330,14 @@ def simulate(
                 for warning in w:
                     glycowork_messages.append(f"{warning.category.__name__}: {warning.message}")
         else:
-            np.random.seed(42)
             results = get_differential_expression(
                 df_processed,
-                group1=bm_cols,
-                group2=r7_cols,
-                transform="CLR",
-                impute=True
+                group1 = bm_cols,
+                group2 = r7_cols,
+                transform = "CLR",
+                impute = True,
+                paired = False,
+                random_state = 42
             )
 
         # Handle cases where glycowork filters out some glycans or returns NaN
@@ -413,12 +419,21 @@ def simulate(
             _clr_all_real = np.vstack([_clr_H_real, _clr_U_real])
             Sigma_mvn = LedoitWolf().fit(_clr_all_real).covariance_  # shrunk pooled covariance
             if verbose:
-                print(f"[Copula] Ledoit-Wolf covariance estimated from {_clr_all_real.shape[0]} samples × {n_glycans} features")
+                print(
+                    f"[Copula] Ledoit-Wolf covariance estimated from {_clr_all_real.shape[0]} samples × {n_glycans} features")
         else:
             # Still need to match real data size even if not using real effect sizes
             n_glycans = n_glycans_real
             alpha_H = np.ones(n_glycans) * 10
             alpha_U_base = None  # Will generate synthetically in loop
+            # The copula backbone still has to come from somewhere; without this the run loop
+            # dereferences the synthetic-branch names (_K_bio, _top_evecs_syn, _clr_all_syn,
+            # _Sigma_syn) that are never bound on the real-data path.
+            _clr_all_syn = clr(df_processed[r7_cols + bm_cols].values.T)
+            _Sigma_syn = LedoitWolf().fit(_clr_all_syn).covariance_
+            _K_bio = min(3, n_glycans - 1)
+            _, _evecs_syn = np.linalg.eigh(_Sigma_syn)
+            _top_evecs_syn = _evecs_syn[:, -_K_bio:]
         # Quick check: Original real data bio effect (only in hybrid mode)
         original_data_bio_check = None
         if use_real_effect_sizes:
@@ -461,7 +476,9 @@ def simulate(
     if pair_corr_target is not None and motif_rules is not None and glycan_sequences is not None:
         _pairs_pc = find_compositional_pairs(list(glycan_sequences[:n_glycans]), motif_rules, verbose = verbose,
                                              prefix = "PairCorr ")
-        _sp = list(zip(_pairs_pc['substrates'], _pairs_pc['products']))
+        _sp = sorted(
+            {(min(_si, _pi), max(_si, _pi)) for _si, _pi in zip(_pairs_pc['substrates'], _pairs_pc['products']) if
+             _si != _pi})
         if _sp and use_real_effect_sizes:
             _pc_raw = []
             for _si, _pi in _sp:
@@ -470,7 +487,8 @@ def simulate(
                     np.corrcoef(_clr_U_real[:, _si], _clr_U_real[:, _pi])[0, 1] if _clr_U_real.shape[0] > 2 else np.nan]
                        if not np.isnan(v)]
                 if pair_corr_target == "auto" and _rv:
-                    _pc_raw.append((_si, _pi, float(np.mean(_rv))))
+                    _pc_raw.append(
+                        (_si, _pi, float(np.tanh(np.mean([np.arctanh(np.clip(v, -0.999, 0.999)) for v in _rv])))))
                 elif pair_corr_target != "auto":
                     _pc_raw.append((_si, _pi, float(pair_corr_target)))
             if _pc_raw:
@@ -697,8 +715,7 @@ def simulate(
             if glycowork_messages:
                 metadata['glycowork_messages'] = glycowork_messages
             metadata['differential_expression_config'] = {
-                'jitter_applied': True,
-                'jitter_range': [1e-6, 1.1e-6],
+                'jitter_applied': False,
                 'differential_expression_config': {
                     'group1_type': 'disease',
                     'group1_prefix': unhealthy_prefix_used,
@@ -1249,11 +1266,12 @@ def simulate_circadian(data_file=None, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], 
         for g in range(n_glycans):
             res[:, g] = np.quantile(R[:, g], U[:, g])
         clr_clean = amp_scale * (cos_c[None, :] * np.cos(omega * cum)[:, None] + sin_c[None, :] * np.sin(omega * cum)[:, None]) + M[None, :] + res
-        comp = np.exp(clr_clean)
-        comp = comp / comp.sum(axis=1, keepdims=True) * 100
-        Y_clean = pd.DataFrame(comp.T, index=glycans, columns=cols)
+        comp = np.exp2(clr_clean)
+        comp = comp / comp.sum(axis = 1, keepdims = True) * 100
+        Y_clean = pd.DataFrame(comp.T, index = glycans, columns = cols)
         Y_clean.index.name = "glycan"
-        Y_clean_clr = pd.DataFrame(clr(Y_clean.values.T).T, index=glycans, columns=cols)
+        Y_clean_clr = pd.DataFrame((clr_clean - clr_clean.mean(axis = 1, keepdims = True)).T, index = glycans,
+                                   columns = cols)
         # ── Phase-stratified batches so batch is orthogonal to ZT ──────────
         batch_labels = np.empty(N, dtype=int)
         for phase in np.unique(cum):
@@ -1391,9 +1409,9 @@ def glycoforge_power(
             vs = []
             for seed in range(n_seeds):
                 df = sim_df(n, inj, seed)
-                np.random.seed(seed)
                 with contextlib.redirect_stdout(io.StringIO()):
-                    res = get_differential_expression(df, group1=cols(n)[n:], group2=cols(n)[:n], transform="CLR", impute=True)
+                    res = get_differential_expression(df, group1 = cols(n)[n:], group2 = cols(n)[:n], transform = "CLR",
+                                                      impute = True, paired = False, random_state = seed)
                 flag = dict(zip(res["Glycan"], res["significant"]))
                 sig = np.array([bool(flag.get(s, False)) for s in seqs])
                 vs.append(sig[gmask].mean())
@@ -1411,9 +1429,10 @@ def glycoforge_power(
             det, es = [], []
             for seed in range(motif_n_seeds):
                 df = sim_df(n, inj, seed)
-                np.random.seed(seed)
                 with contextlib.redirect_stdout(io.StringIO()):
-                    res = get_differential_expression(df, group1=cols(n)[n:], group2=cols(n)[:n], motifs=True, transform="CLR", impute=True)
+                    res = get_differential_expression(df, group1 = cols(n)[n:], group2 = cols(n)[:n], motifs = True,
+                                                      transform = "CLR", impute = True, paired = False,
+                                                      random_state = seed)
                 row = res[res["Glycan"] == target_motif]
                 if len(row):
                     det.append(float(row["significant"].iloc[0]))
@@ -1496,14 +1515,12 @@ def glycoforge_reliability(df, healthy_prefix, unhealthy_prefix, n_glycans=None,
             Y, _, _, _ = apply_mnar_missingness(Y, missing_fraction=missing_fraction, seed=seed0 + s, verbose=False)
         d = Y.reset_index()
         d.columns = ["glycan"] + cols
-        np.random.seed(seed0 + s)
         with contextlib.redirect_stdout(io.StringIO()):
-            res = get_differential_expression(d, group1=cols[n_H:], group2=cols[:n_H], transform="CLR", impute=True)
+            res = get_differential_expression(d, group1=cols[n_H:], group2=cols[:n_H], transform="CLR", impute=True, paired=False, random_state=seed0 + s)
         fp[s] = int(res["significant"].sum()) if "significant" in res.columns else 0
     df_real = df.iloc[glycan_idx][["glycan"] + r_cols + u_cols]
-    np.random.seed(seed0)
     with contextlib.redirect_stdout(io.StringIO()):
-        real = get_differential_expression(df_real, group1 = u_cols, group2 = r_cols, transform = "CLR", impute = True)
+        real = get_differential_expression(df_real, group1 = u_cols, group2 = r_cols, transform = "CLR", impute = True, paired = False, random_state = seed0)
     n_real_sig = int(real["significant"].sum()) if "significant" in real.columns else 0
     out = {"n_glycans": n_glycans, "n_H": n_H, "n_U": n_U, "missing_fraction": missing_fraction, "false_positive_rate": float(fp.mean() / n_glycans), "expected_false_positives": float(fp.mean()), "expected_false_positives_95": float(np.quantile(fp, 0.95)), "n_real_significant": n_real_sig, "expected_true_positives": float(max(0.0, n_real_sig - fp.mean()))}
     if verbose:

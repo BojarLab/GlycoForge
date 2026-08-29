@@ -4,12 +4,12 @@ warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import os
 import re
 from sklearn.decomposition import PCA
 from scipy.stats import f_oneway, shapiro, kruskal
 from scipy.optimize import brentq
 from glycowork.motif.graph import subgraph_isomorphism
+from glycowork.glycan_data.loader import remove_unmatched_brackets
 
 
 _network_cache = {}
@@ -22,6 +22,7 @@ def find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose
   Returns: {'substrates': [indices that decrease], 'products': [indices that increase],
             'unpaired_up': [unpaired increasing], 'unpaired_down': [unpaired decreasing]}"""
   from glycowork.network.biosynthesis import construct_network
+  from glycowork.motif.processing import canonicalize_iupac
   
   # Early return for empty motif_rules to avoid UnboundLocalError
   if not motif_rules:
@@ -46,6 +47,11 @@ def find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose
     if verbose:
       print(f"  {prefix}Using cached network with {len(network.nodes())} nodes, {len(network.edges())} edges")
   real_nodes = [node for node in network.nodes() if network.nodes[node].get('virtual', 0) == 0]
+  # construct_network canonicalizes its input, so node names are canonical IUPAC while
+  # glycan_sequences may not be; indexing on the raw string silently misses every pair.
+  canon_pos = {}
+  for _i, _g in enumerate(glycan_sequences):
+      canon_pos.setdefault(canonicalize_iupac(_g), _i)
   substrates, products = [], []
   for motif, direction in motif_rules.items():
     is_loss = direction.lower() in ["down", "downregulate", "decrease"]
@@ -54,8 +60,8 @@ def find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose
       edge_label = data.get('diffs', '')
       if motif in edge_label and u in real_nodes and v in real_nodes:
         try:
-          u_idx = glycan_sequences.index(u)
-          v_idx = glycan_sequences.index(v)
+          u_idx = canon_pos[u]
+          v_idx = canon_pos[v]
           if is_loss:
             substrates.append(v_idx)
             products.append(u_idx)
@@ -65,7 +71,7 @@ def find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose
           if verbose:
             direction_str = "↓" if is_loss else "↑"
             print(f"  {prefix}network pair: [{u_idx}] {u} ↔ [{v_idx}] {v} (edge: {edge_label}, {motif} {direction_str})")
-        except ValueError:
+        except KeyError:
           pass
   paired_set = set(substrates) | set(products)
   unpaired_up, unpaired_down = [], []
@@ -86,13 +92,15 @@ def identify_motif_counterpart(glycan_sequence, motif="Neu5Ac"):
     Returns the product structure or None if motif not found."""
     if not subgraph_isomorphism(glycan_sequence, motif):
         return None
+    # Motifs carry regex metacharacters: unescaped, 'Neu5Ac(a2-3)Gal' compiles '(a2-3)' as a
+    # capture group and matches nothing, so every parenthesized motif silently found no counterpart.
+    esc = re.escape(motif)
     patterns = [
-        rf'{motif}\([a-z0-9\-]+\)',  # Neu5Ac(a2-3), Neu5Ac(a2-6), etc.
-        rf'{motif}'  # Bare motif
+        rf'{esc}\([a-z0-9\-]+\)',  # Neu5Ac(a2-3), Neu5Ac(a2-6), etc.
+        esc  # Bare motif
     ]
     for pattern in patterns:
-        desialylated = re.sub(pattern, '', glycan_sequence)
-        desialylated = desialylated.strip()
+        desialylated = remove_unmatched_brackets(re.sub(pattern, '', glycan_sequence).strip())
         if desialylated and desialylated != glycan_sequence:
             return desialylated
     return None
@@ -145,12 +153,14 @@ def parse_simulation_config(config):
     parsed = {}
     # Direct copy simple parameters
     simple_params = [
-        'data_source', 'data_file', 'n_glycans', 'n_H', 'n_U',
+        'data_source', 'data_file', 'glycan_class', 'n_glycans', 'n_H', 'n_U',
         'bio_strength', 'k_dir', 'variance_ratio', 'use_real_effect_sizes',
         'differential_mask', 'column_prefix', 'n_batches',
         'kappa_mu', 'var_b', 'winsorize_percentile', 'baseline_method',
         'u_dict', 'random_seeds', 'output_dir', 'verbose', 'save_csv', 'show_pca_plots',
-        'missing_fraction', 'mnar_bias'
+        'missing_fraction', 'mnar_bias',
+        'glycan_sequences', 'motif_rules', 'motif_bias', 'pair_corr_target',
+        'batch_motif_rules', 'batch_motif_bias', 'batch_mode'
     ]
     for key in simple_params:
         if key in config:

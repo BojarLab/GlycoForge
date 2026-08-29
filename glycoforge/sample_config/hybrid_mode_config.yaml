@@ -20,7 +20,7 @@ random_seeds: [42, 123, 2024, 7, 99, 56, 88, 314, 271, 1618]
 #   - Local file path: "path/to/file_name.csv"
 #   - Glycowork built-in dataset: "glycomics_human_leukemia_O_PMID34646384" (with or without .csv)
 data_source: "real"
-data_file: "glycomics_human_leukemia_O_PMID34646384.csv"  #glycomics_human_liver_O_PMC5383776.csv
+data_file: "human_leukemia_O_PMID34646384"  #glycomics_human_liver_O_PMC5383776.csv
 use_real_effect_sizes: true # false = use uniform effect sizes for all bio-significant glycans
 column_prefix:
   healthy: "R7"       # Columns starting with this prefix are treated as healthy/control group
