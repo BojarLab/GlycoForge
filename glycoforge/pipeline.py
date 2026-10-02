@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from sklearn.covariance import LedoitWolf
 from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_bio_injection_from_real_data, define_differential_mask, calibrate_pair_corr
 from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
-from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, apply_mnar_missingness, find_compositional_pairs
+from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, apply_missingness, find_compositional_pairs
 
 
 def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
@@ -42,9 +42,13 @@ def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
     _sub = _mat.iloc[_keep].reset_index(drop=True)
     _top = _sub.mean(axis=1).nlargest(n_glycans).index.tolist()
     _vals = _sub.iloc[_top].values.T
-    _vals = _vals[~np.isnan(_vals).any(axis=1)]
+    _vals = _vals[~np.isnan(_vals).any(axis=1)].astype(float)
     if _vals.shape[0] < 2:
       continue
+    # Zeros are this dataset's own missing values; clr's 1e-6 floor would turn them into extreme CLR outliers that the
+    # copula then reproduces as quasi-zero "clean" abundances, so substitute half the glycan's minimum observed value
+    _half_min = np.min(_vals, axis=0, where=_vals > 0, initial=np.inf) / 2
+    _vals = np.where(_vals > 0, _vals, np.nan_to_num(_half_min, posinf=1e-6))
     _clr_i = clr(_vals)
     if _clr_i.shape[1] < n_glycans:
       continue
@@ -95,6 +99,8 @@ def simulate(
     u_dict=None,
     missing_fraction=0.0,
     mnar_bias=1.0,
+    missing_mechanism="MNAR",  # "MNAR", "MCAR", "MAR", or "mixed"; a list runs a grid over mechanisms
+    missing_params=None,  # overrides for apply_missingness defaults (mcar_share, sample_sd, dominance, top_k, group_sd, batch_sd)
     glycan_sequences=None,
     motif_rules = None,
     motif_bias = 0.8,
@@ -135,6 +141,7 @@ def simulate(
         'baseline_method': baseline_method,
         'missing_fraction': missing_fraction,
         'mnar_bias': mnar_bias,
+        'missing_mechanism': missing_mechanism,
         'batch_mode': batch_mode,
         'motif_bias': motif_bias,
         'batch_motif_bias': batch_motif_bias
@@ -191,6 +198,8 @@ def simulate(
                 'u_dict': u_dict,
                 'missing_fraction': missing_fraction,
                 'mnar_bias': mnar_bias,
+                'missing_mechanism': missing_mechanism,
+                'missing_params': missing_params,
                 'glycan_sequences': glycan_sequences,
                 'motif_rules': motif_rules,
                 'motif_bias': motif_bias,
@@ -232,7 +241,7 @@ def simulate(
         print(f"Bio signal: bio_strength={bio_strength}, k_dir={k_dir}, variance_ratio={variance_ratio}")
         print(f"  → Healthy k_dir={k_dir:.1f}, Unhealthy k_dir={k_dir/variance_ratio:.1f}")
         print(f"Batch: n_batches={n_batches}, kappa_mu={kappa_mu}, var_b={var_b}")
-        print(f"Missingness: fraction={missing_fraction:.1%}, bias={mnar_bias}")
+        print(f"Missingness: {missing_mechanism}, fraction={missing_fraction:.1%}, bias={mnar_bias}")
         print(f"Output: {output_dir}")
         print("=" * 60)
     # Step 1: Prepare alpha_H based on data source
@@ -296,7 +305,14 @@ def simulate(
         # Get actual number of glycans from real data
         n_glycans_real = df.shape[0]
         numeric_cols = r7_cols + bm_cols
+        df = df.copy()
+        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce").fillna(0)  # NaN and 0 both encode missing values
         df_processed = df.copy()
+        # Zeros are the template's own missing values; clr's 1e-6 floor would make the copula reproduce them as quasi-zero
+        # "clean" abundances, so the copula reference substitutes half of each glycan's minimum observed value
+        _real_vals = df[numeric_cols].values.astype(float)
+        _half_min = np.min(_real_vals, axis=1, keepdims=True, where=_real_vals > 0, initial=np.inf) / 2
+        _real_vals = np.where(_real_vals > 0, _real_vals, np.nan_to_num(_half_min, posinf=1e-6))
         if verbose:
             print(f"[Real Data] Calling get_differential_expression with:")
             print(f"  - group1 (disease/unhealthy): {len(bm_cols)} samples (expected: {unhealthy_prefix})")
@@ -414,9 +430,7 @@ def simulate(
             # Compute MVN sampler parameters once (reused across all seeds).
             # We use Ledoit-Wolf shrinkage because n_samples << n_glycans is typical in glycomics,
             # making the raw sample covariance rank-deficient and numerically unusable.
-            _clr_H_real = clr(df_processed[r7_cols].values.T)  # (n_H, n_glycans)
-            _clr_U_real = clr(df_processed[bm_cols].values.T)  # (n_U, n_glycans)
-            _clr_all_real = np.vstack([_clr_H_real, _clr_U_real])
+            _clr_all_real = clr(_real_vals.T)  # (n_H + n_U, n_glycans)
             Sigma_mvn = LedoitWolf().fit(_clr_all_real).covariance_  # shrunk pooled covariance
             if verbose:
                 print(
@@ -429,7 +443,7 @@ def simulate(
             # The copula backbone still has to come from somewhere; without this the run loop
             # dereferences the synthetic-branch names (_K_bio, _top_evecs_syn, _clr_all_syn,
             # _Sigma_syn) that are never bound on the real-data path.
-            _clr_all_syn = clr(df_processed[r7_cols + bm_cols].values.T)
+            _clr_all_syn = clr(_real_vals.T)
             _Sigma_syn = LedoitWolf().fit(_clr_all_syn).covariance_
             _K_bio = min(3, n_glycans - 1)
             _, _evecs_syn = np.linalg.eigh(_Sigma_syn)
@@ -599,11 +613,19 @@ def simulate(
         if save_csv:
             Y_with_batch.to_csv(f"{output_dir}/2_Y_with_batch_seed{seed}.csv", float_format="%.32f")
             Y_with_batch_clr.to_csv(f"{output_dir}/2_Y_with_batch_clr_seed{seed}.csv", float_format="%.32f")
-        # Step 4.5: Apply MNAR missingness
-        Y_missing, Y_missing_clr, missing_mask, missing_diagnostics = apply_mnar_missingness(
+        bio_groups, bio_labels = create_bio_groups(
+            Y_clean_clr,
+            {'Healthy': ['healthy'], 'Unhealthy': ['unhealthy']}
+        )
+        # Step 4.5: Apply missingness
+        Y_missing, Y_missing_clr, missing_mask, missing_diagnostics = apply_missingness(
             Y_with_batch,
             missing_fraction=missing_fraction,
+            mechanism=missing_mechanism,
             mnar_bias=mnar_bias,
+            missing_params=missing_params,
+            group_labels=bio_labels,
+            batch_labels=batch_labels,
             seed=seed,
             verbose=verbose
         )
@@ -613,10 +635,6 @@ def simulate(
         # Use Y_missing_clr for subsequent analysis if missingness applied
         Y_for_analysis = Y_missing_clr if missing_fraction > 0 else Y_with_batch_clr
         # Step 5: Quick batch effect check
-        bio_groups, bio_labels = create_bio_groups(
-            Y_clean_clr,
-            {'Healthy': ['healthy'], 'Unhealthy': ['unhealthy']}
-        )
         if verbose:
             print("\n" + "=" * 60)
             print("QUICK BATCH EFFECT CHECK")
@@ -659,6 +677,8 @@ def simulate(
             'overlap_prob': overlap_prob,
             'missing_fraction': missing_fraction,
             'mnar_bias': mnar_bias,
+            'missing_mechanism': missing_mechanism,
+            'missing_params': missing_params,
             'sigma_mean': float(np.mean(sigma)),
             'sigma_std': float(np.std(sigma))
         }
@@ -789,6 +809,8 @@ def simulate(
             'var_b': var_b,
             'missing_fraction': missing_fraction,
             'mnar_bias': mnar_bias,
+            'missing_mechanism': missing_mechanism,
+            'missing_params': missing_params,
             'random_seeds': random_seeds,
             'affected_fraction': affected_fraction,
             'positive_prob': positive_prob,
@@ -854,6 +876,8 @@ def simulate_paired(
   # missing-value patterns are not artificially correlated.
   missing_fraction=0.0,
   mnar_bias=1.0,
+  missing_mechanism="MNAR",
+  missing_params=None,
   # ── Meta ───────────────────────────────────────────────────────────────────
   random_seeds=None,
   output_dir="results/paired/",
@@ -938,6 +962,12 @@ def simulate_paired(
   mnar_bias : float
       MNAR intensity bias; higher values make low-abundance glycans more likely
       to be missing (models MS detection limits).
+  missing_mechanism : str
+      'MNAR', 'MCAR', 'MAR', or 'mixed'; see apply_missingness. Under 'MAR'/'mixed' the
+      shared bio_labels and batch_labels act as observed drivers in both glycomes.
+  missing_params : dict or None
+      Overrides for apply_missingness defaults (mcar_share, sample_sd, dominance,
+      top_k, group_sd, batch_sd).
   random_seeds : list of int or None
       One run is produced per seed. Seeds are offset internally (+1000, +2000, etc.)
       to ensure glycome A and B have independent biological and coupling draws while
@@ -1126,13 +1156,15 @@ def simulate_paired(
     # seed+1 for B so that each glycome's missing-value pattern is drawn from
     # an independent stream; using the same seed would make missingness trivially
     # correlated across classes (the same glycans absent in both datasets).
-    Y_A_missing, Y_A_missing_clr, _, diag_A = apply_mnar_missingness(
-      Y_A_batch, missing_fraction=missing_fraction,
-      mnar_bias=mnar_bias, seed=seed, verbose=verbose
+    Y_A_missing, Y_A_missing_clr, _, diag_A = apply_missingness(
+      Y_A_batch, missing_fraction=missing_fraction, mechanism=missing_mechanism,
+      mnar_bias=mnar_bias, missing_params=missing_params, group_labels=bio_labels,
+      batch_labels=batch_labels, seed=seed, verbose=verbose
     )
-    Y_B_missing, Y_B_missing_clr, _, diag_B = apply_mnar_missingness(
-      Y_B_batch, missing_fraction=missing_fraction,
-      mnar_bias=mnar_bias, seed=seed + 1, verbose=verbose
+    Y_B_missing, Y_B_missing_clr, _, diag_B = apply_missingness(
+      Y_B_batch, missing_fraction=missing_fraction, mechanism=missing_mechanism,
+      mnar_bias=mnar_bias, missing_params=missing_params, group_labels=bio_labels,
+      batch_labels=batch_labels, seed=seed + 1, verbose=verbose
     )
     if missing_fraction > 0 and save_csv:
       Y_A_missing.to_csv(f"{output_dir}/A_3_missing_seed{seed}.csv", float_format="%.32f")
@@ -1153,6 +1185,8 @@ def simulate_paired(
       'var_b': var_b,
       'missing_fraction': missing_fraction,
       'mnar_bias': mnar_bias,
+      'missing_mechanism': missing_mechanism,
+      'missing_params': missing_params,
       'bio_labels': bio_labels.tolist(),
       'batch_labels': batch_labels.tolist(),
       'batch_groups': {k: list(v) for k, v in batch_groups.items()},
@@ -1180,7 +1214,8 @@ def simulate_circadian(data_file=None, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], 
                        amp_scale=2.0, sim_zt_seq=None, sim_reps=None, sim_cum_seq=None, n_batches=3, kappa_mu=1.0,
                        var_b=0.5, affected_fraction=(0.05, 1), positive_prob=0.6, overlap_prob=0.5,
                        batch_motif_rules=None, batch_motif_bias=0.8, batch_mode="additive", missing_fraction=0.0,
-                       mnar_bias=1.0, random_seeds=[42], output_dir="results/circadian/", verbose=False, save_csv=True):
+                       mnar_bias=1.0, missing_mechanism="MNAR", missing_params=None, random_seeds=[42],
+                       output_dir="results/circadian/", verbose=False, save_csv=True):
     """Simulate circadian glycomics data grounded on a real time-course dataset.
 
     Fits per-glycan cosinor rhythms and the arrhythmic residual backbone from data_file
@@ -1210,8 +1245,8 @@ def simulate_circadian(data_file=None, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], 
         replicates or denser sampling) for power analysis.
     n_batches, kappa_mu, var_b, affected_fraction, positive_prob, overlap_prob, batch_motif_rules, batch_motif_bias, batch_mode :
         Batch-effect parameters, passed to define_batch_direction and apply_batch_effect.
-    missing_fraction, mnar_bias : float
-        MNAR missingness parameters, passed to apply_mnar_missingness.
+    missing_fraction, mnar_bias, missing_mechanism, missing_params :
+        Missingness parameters, passed to apply_missingness (batch_labels act as the observed MAR driver).
     random_seeds : list of int
         One run per seed.
     output_dir : str
@@ -1290,8 +1325,9 @@ def simulate_circadian(data_file=None, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], 
             var_b=var_b, seed=seed, batch_motif_rules=batch_motif_rules, glycan_sequences=glycans, batch_mode=batch_mode)
         Y_batch_clr = pd.DataFrame(Y_batch_clr_T.T, index=glycans, columns=cols)
         Y_batch = pd.DataFrame(Y_batch_T.T, index=glycans, columns=cols)
-        Y_missing, Y_missing_clr, _, missing_diag = apply_mnar_missingness(
-            Y_batch, missing_fraction=missing_fraction, mnar_bias=mnar_bias, seed=seed, verbose=verbose)
+        Y_missing, Y_missing_clr, _, missing_diag = apply_missingness(
+            Y_batch, missing_fraction=missing_fraction, mechanism=missing_mechanism, mnar_bias=mnar_bias,
+            missing_params=missing_params, batch_labels=batch_labels, seed=seed, verbose=verbose)
         Y_final = Y_missing_clr if missing_fraction > 0 else Y_batch_clr
         if save_csv:
             Y_clean.to_csv(f"{output_dir}/1_clean_seed{seed}.csv", float_format="%.32f")
@@ -1307,7 +1343,8 @@ def simulate_circadian(data_file=None, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], 
             "batch_groups": {int(k): v for k, v in batch_groups.items()}, "rhythmic": params["rhythmic"].tolist(),
             "amplitude": params["amplitude"].tolist(), "acrophase_ZT": params["acrophase_ZT"].tolist(),
             "n_batches": n_batches, "kappa_mu": kappa_mu, "var_b": var_b, "batch_mode": batch_mode,
-            "missing_fraction": missing_fraction, "mnar_bias": mnar_bias, "missingness": missing_diag,
+            "missing_fraction": missing_fraction, "mnar_bias": mnar_bias, "missing_mechanism": missing_mechanism,
+            "missing_params": missing_params, "missingness": missing_diag,
             "affected_fraction": list(affected_fraction) if isinstance(affected_fraction, tuple) else affected_fraction}
         with open(f"{output_dir}/metadata_seed{seed}.json", "w") as f:
             json.dump(run_meta, f, indent=2)
@@ -1512,7 +1549,7 @@ def glycoforge_reliability(df, healthy_prefix, unhealthy_prefix, n_glycans=None,
         P, _ = simulate_clean_data(np.ones(n_glycans), np.ones(n_glycans), n_H, n_U, seed=seed0 + s, real_clr_ref=clr_ref, Sigma_lw=Sigma, injection=np.zeros(n_glycans))
         Y = pd.DataFrame(P.T, index=seqs, columns=cols)
         if missing_fraction > 0:
-            Y, _, _, _ = apply_mnar_missingness(Y, missing_fraction=missing_fraction, seed=seed0 + s, verbose=False)
+            Y, _, _, _ = apply_missingness(Y, missing_fraction=missing_fraction, seed=seed0 + s, verbose=False)
         d = Y.reset_index()
         d.columns = ["glycan"] + cols
         with contextlib.redirect_stdout(io.StringIO()):

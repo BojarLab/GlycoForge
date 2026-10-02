@@ -327,8 +327,10 @@ if is_paired:
 # ── Missingness ───────────────────────────────────────────────────────────────
 st.sidebar.subheader("Missingness")
 missing_fraction = st.sidebar.slider("missing_fraction", 0.0, 0.8, 0.0, 0.05)
+missing_mechanism = st.sidebar.selectbox("missing_mechanism", ["MNAR", "MCAR", "MAR", "mixed"],
+  help="MNAR: detection limit. MCAR: random dropouts. MAR: driven by observed sample information. mixed: realistic composite")
 mnar_bias = st.sidebar.slider("mnar_bias", 0.5, 5.0, 1.0, 0.1,
-  help="Steepness of intensity-dependent missingness")
+  help="Steepness of intensity-dependent missingness (MNAR, mixed)")
 
 # ── Advanced ──────────────────────────────────────────────────────────────────
 with st.sidebar.expander("Advanced"):
@@ -364,7 +366,7 @@ run_btn = st.sidebar.button("▶  Run simulation", type="primary", width='stretc
 
 # ── Main area ─────────────────────────────────────────────────────────────────
 st.title("GlycoForge simulation")
-st.caption("Realistic glycomics data simulation with controllable batch effects and MNAR missingness.")
+st.caption("Realistic glycomics data simulation with controllable batch effects and MNAR/MAR/MCAR missingness.")
 
 if not run_btn:
   st.info("Configure parameters in the sidebar and click **Run simulation** to start.")
@@ -398,6 +400,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
       affected_fraction=affected_fraction,
       positive_prob=float(positive_prob), overlap_prob=float(overlap_prob),
       missing_fraction=float(missing_fraction), mnar_bias=float(mnar_bias),
+      missing_mechanism=missing_mechanism,
       random_seeds=random_seeds, verbose=verbose,
     )
     with st.spinner("Running paired GlycoForge simulation…"):
@@ -467,6 +470,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
       overlap_prob=float(overlap_prob),
       missing_fraction=float(missing_fraction),
       mnar_bias=float(mnar_bias),
+      missing_mechanism=missing_mechanism,
       random_seeds=random_seeds,
       verbose=verbose,
     )

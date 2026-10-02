@@ -469,22 +469,22 @@ def test_mnar_missingness_basic():
     4. CLR-transformed data has no NaN values
     5. diagnostics contains necessary statistics
     """
-    from glycoforge.utils import apply_mnar_missingness
-    
+    from glycoforge.utils import apply_missingness
+
     # Use real data subset for testing
     try:
         df = glycomics_data_loader.human_leukemia_O_PMID34646384
         # Skip first column (glycan names) and get numeric data only
-        numeric_cols = df.select_dtypes(include=[np.number]).columns[:10]
-        Y_test = df[numeric_cols].values.T  # First 10 numeric columns, transposed
+        numeric_cols = df.select_dtypes(include = [np.number]).columns[:10]
+        Y_test = df[numeric_cols].values  # glycans x first 10 samples
     except Exception as e:
         # Fallback: use synthetic data
         print(f"Using synthetic data for test_mnar_missingness_basic: {e}")
         Y_test = np.random.rand(10, 5) * 100
-    
+
     target_missing_fraction = 0.3
-    
-    Y_missing, Y_missing_clr, missing_mask, diagnostics = apply_mnar_missingness(
+
+    Y_missing, Y_missing_clr, missing_mask, diagnostics = apply_missingness(
         Y_test,
         missing_fraction=target_missing_fraction,
         mnar_bias=2.0,
@@ -528,38 +528,38 @@ def test_mnar_intensity_bias():
     2. mnar_bias parameter affects the degree of bias
     3. Extreme cases: bias=0 (random) vs bias=5 (strong bias)
     """
-    from glycoforge.utils import apply_mnar_missingness
-    
+    from glycoforge.utils import apply_missingness
+
     # Construct data with known intensity gradient
     n_samples, n_glycans = 20, 5
-    Y_test = np.tile([0.5, 2.0, 10.0, 30.0, 50.0], (n_samples, 1))
+    Y_test = np.tile([0.5, 2.0, 10.0, 30.0, 50.0], (n_samples, 1)).T
     # Add some noise
     np.random.seed(42)
-    Y_test += np.random.rand(n_samples, n_glycans) * 0.1
-    
+    Y_test += np.random.rand(n_glycans, n_samples) * 0.1
+
     target_missing_fraction = 0.3
-    
+
     # Test with strong MNAR bias
-    _, _, missing_mask_strong, _ = apply_mnar_missingness(
+    _, _, missing_mask_strong, _ = apply_missingness(
         Y_test,
-        missing_fraction=target_missing_fraction,
-        mnar_bias=5.0,
-        seed=42,
-        verbose=False
+        missing_fraction = target_missing_fraction,
+        mnar_bias = 5.0,
+        seed = 42,
+        verbose = False
     )
-    
+
     # Test with weak MNAR bias
-    _, _, missing_mask_weak, _ = apply_mnar_missingness(
+    _, _, missing_mask_weak, _ = apply_missingness(
         Y_test,
-        missing_fraction=target_missing_fraction,
-        mnar_bias=0.5,
-        seed=43,
-        verbose=False
+        missing_fraction = target_missing_fraction,
+        mnar_bias = 0.5,
+        seed = 43,
+        verbose = False
     )
-    
+
     # Validation 1: Calculate missing rates per glycan column
-    missing_rate_per_glycan_strong = missing_mask_strong.sum(axis=0) / n_samples
-    missing_rate_per_glycan_weak = missing_mask_weak.sum(axis=0) / n_samples
+    missing_rate_per_glycan_strong = missing_mask_strong.sum(axis = 1) / n_samples
+    missing_rate_per_glycan_weak = missing_mask_weak.sum(axis = 1) / n_samples
     
     # Validation 2: With strong bias, low-intensity glycans should have higher missing rate
     # Column 0 (intensity ~0.5) should have higher missing rate than column 4 (intensity ~50)
@@ -585,54 +585,84 @@ def test_mnar_edge_cases():
     4. Single sample/feature data works
     5. Random seed ensures reproducibility
     """
-    from glycoforge.utils import apply_mnar_missingness
-    
+    from glycoforge.utils import apply_missingness
+
     # Test data
     Y_test = np.random.rand(10, 5) * 100
-    
+
     # Test 1: missing_fraction=0 should produce no missing values
-    Y_missing_0, Y_clr_0, mask_0, diag_0 = apply_mnar_missingness(
-        Y_test, missing_fraction=0.0, seed=42, verbose=False
+    Y_missing_0, Y_clr_0, mask_0, diag_0 = apply_missingness(
+        Y_test, missing_fraction = 0.0, seed = 42, verbose = False
     )
     assert np.sum(mask_0) == 0
     assert not np.any(np.isnan(Y_missing_0))
-    
+
     # Test 2: missing_fraction=1 should make everything missing
-    Y_missing_1, Y_clr_1, mask_1, diag_1 = apply_mnar_missingness(
-        Y_test, missing_fraction=1.0, seed=42, verbose=False
+    Y_missing_1, Y_clr_1, mask_1, diag_1 = apply_missingness(
+        Y_test, missing_fraction = 1.0, seed = 42, verbose = False
     )
     assert np.sum(mask_1) == mask_1.size
     assert np.all(np.isnan(Y_missing_1))
-    
+
     # Test 3: All-zero data should not crash
     Y_zeros = np.zeros((5, 3))
-    Y_missing_zeros, _, mask_zeros, _ = apply_mnar_missingness(
-        Y_zeros, missing_fraction=0.5, seed=42, verbose=False
+    Y_missing_zeros, _, mask_zeros, _ = apply_missingness(
+        Y_zeros, missing_fraction = 0.5, seed = 42, verbose = False
     )
     assert Y_missing_zeros.shape == Y_zeros.shape
-    
+
     # Test 4: Single sample/feature cases
     Y_single_sample = np.random.rand(1, 5) * 100
-    Y_missing_ss, _, mask_ss, _ = apply_mnar_missingness(
-        Y_single_sample, missing_fraction=0.3, seed=42, verbose=False
+    Y_missing_ss, _, mask_ss, _ = apply_missingness(
+        Y_single_sample, missing_fraction = 0.3, seed = 42, verbose = False
     )
     assert Y_missing_ss.shape == Y_single_sample.shape
-    
+
     Y_single_feature = np.random.rand(10, 1) * 100
-    Y_missing_sf, _, mask_sf, _ = apply_mnar_missingness(
-        Y_single_feature, missing_fraction=0.3, seed=42, verbose=False
+    Y_missing_sf, _, mask_sf, _ = apply_missingness(
+        Y_single_feature, missing_fraction = 0.3, seed = 42, verbose = False
     )
     assert Y_missing_sf.shape == Y_single_feature.shape
-    
+
     # Test 5: Reproducibility with same seed
-    Y_missing_a, _, mask_a, _ = apply_mnar_missingness(
-        Y_test, missing_fraction=0.3, seed=42, verbose=False
+    Y_missing_a, _, mask_a, _ = apply_missingness(
+        Y_test, missing_fraction = 0.3, seed = 42, verbose = False
     )
-    Y_missing_b, _, mask_b, _ = apply_mnar_missingness(
-        Y_test, missing_fraction=0.3, seed=42, verbose=False
+    Y_missing_b, _, mask_b, _ = apply_missingness(
+        Y_test, missing_fraction = 0.3, seed = 42, verbose = False
     )
     assert np.array_equal(mask_a, mask_b)
     assert np.array_equal(np.isnan(Y_missing_a), np.isnan(Y_missing_b))
+
+
+def test_missingness_mechanisms():
+    """Test MCAR, MAR and mixed missingness
+
+    Validates:
+    1. Every mechanism hits the target missing fraction
+    2. MCAR is flat across abundance, mixed is enriched in low-abundance glycans
+    3. MAR never removes the top_k glycans that drive it
+    4. Group labels are reported and invalid mechanisms raise
+    """
+    import pytest
+    from glycoforge.utils import apply_missingness
+    rng = np.random.default_rng(0)
+    Y_test = rng.lognormal(0, 1.5, (40, 1)) * rng.lognormal(0, 0.3, (40, 30))
+    Y_test = Y_test / Y_test.sum(axis=0) * 100
+    low = Y_test.mean(axis=1) < np.median(Y_test.mean(axis=1))
+    groups = np.repeat([0, 1], 15)
+    masks = {}
+    for mechanism in ["MCAR", "MAR", "mixed"]:
+        _, Y_clr, masks[mechanism], diag = apply_missingness(Y_test, missing_fraction=0.25, mechanism=mechanism, group_labels=groups, seed=1, verbose=False)
+        assert abs(masks[mechanism].mean() - 0.25) < 0.05
+        assert np.all(np.isfinite(Y_clr))
+        assert diag['mechanism'] == mechanism and set(diag['missing_rate_by_group']) == {'0', '1'}
+    assert abs(masks["MCAR"][low].mean() - masks["MCAR"][~low].mean()) < 0.1
+    assert masks["mixed"][low].mean() > 2 * masks["mixed"][~low].mean()
+    top = np.argsort(Y_test.mean(axis=1))[-3:]
+    assert not masks["MAR"][top].any()
+    with pytest.raises(ValueError):
+        apply_missingness(Y_test, missing_fraction=0.25, mechanism="MNRA", verbose=False)
 
 
 # --- Coupling tests ---

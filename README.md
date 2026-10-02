@@ -8,20 +8,20 @@
 - **Paired multi-glycome simulation**: `simulate_paired()` generates two glycomic datasets (e.g., _N_- and _O_-glycomics) from the same biological samples, with shared batch labels and optional controllable cross-class coupling
 - **Controllable effects injection**: Systematic grid search over biological effect or batch effect strength parameters
 - **Motif-level effects**: For both bio and batch effects, desired motif differences (e.g., `Neu5Ac: down`) can be introduced. These are propagated in a dynamically constructed biosynthetic network to ensure physiological glycomics data (e.g., corresponding increase in desialylated glycans in the example of `Neu5Ac: down`)
-- **MNAR missing data simulation**: Mimics left-censored patterns biased toward low-abundance glycans
+- **Missing data simulation**: MNAR (left-censored, biased toward low-abundance glycans), MCAR, MAR, and a realistic `mixed` composite, all calibrated on the glycomics datasets in `glycowork`
 
 ## Quick Start
 
 ### Installation
 
-* **Python 3.11–3.13 required** (`>=3.11,<3.14`). We recommend creating a dedicated virtual environment:
+* **Python 3.11–3.14 required** (`>=3.11,<3.15`). We recommend creating a dedicated virtual environment:
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```
 
-* Core dependency: `glycowork>=1.9.0`
+* Core dependency: `glycowork>=1.10.0`
 
 ```bash
 pip install glycoforge
@@ -45,11 +45,16 @@ See [run_simulation.ipynb](run_simulation.ipynb) [![Open In Colab](https://colab
 
 All simulation operates in CLR (centered log-ratio) space using a **Gaussian copula** sampler:
 
-- **Reference construction**: In *synthetic mode*, pool all class-matched `glycowork` datasets, compute per-dataset Ledoit-Wolf covariance, extract and average correlation matrices into a consensus `R`, and collect empirical CLR marginals from the pooled samples. In *templated mode*, compute a single Ledoit-Wolf covariance and extract empirical CLR marginals from the input dataset's samples.
+- **Reference construction**: Zeros (the reference datasets' own missing values) are set to half of each glycan's minimum observed value before CLR, so the copula does not reproduce them as quasi-zero "clean" abundances. In *synthetic mode*, pool all class-matched `glycowork` datasets, compute per-dataset Ledoit-Wolf covariance, extract and average correlation matrices into a consensus `R`, and collect empirical CLR marginals from the pooled samples. In *templated mode*, compute a single Ledoit-Wolf covariance and extract empirical CLR marginals from the input dataset's samples.
 - **Clean data generation** (`simulate_clean_data`): Draw `Z ~ N(0, R_reg)`, apply the probability integral transform to get uniform marginals, then map to real CLR empirical quantiles via linear interpolation. This preserves both inter-feature correlation (Mantel r) and marginal realism (KS).
 - **Biological injection**: In *templated mode*, inject real effect sizes in CLR space: `z_U = z_H + m * lambda * d_robust`, where `m` is the differential mask, `lambda` is `bio_strength`, and `d_robust` is the effect vector after `robust_effect_size_processing`. In *synthetic mode*, inject along the top-K eigenvectors of the pooled covariance with random signs, scaled by `bio_strength * std * sqrt(n_glycans)` to remain PVCA-meaningful across feature counts. The `alpha_H` and `alpha_U` parameters are computed to define the CLR-space injection direction (via `clr(p_U) - clr(p_H)`)
 - **Batch effects**: Two modes controlled by `batch_mode`. In additive mode (default, ComBat-correctable): `Y_batch = Y_clean + kappa_mu * sigma * u_b + epsilon`. In multiplicative mode (non-linear): `Y_batch = Y_clean + kappa_mu * u_b * Y_clean + epsilon`. Variance inflation uses batch-specific scale factors spread evenly around 1.0, controlled by `var_b`. Compositional pairing ensures substrate-product glycans receive correlated noise.
-- **MNAR missingness**: Logistic model in log-abundance space with per-sample intercept solved via Brent's method for exact target missingness fraction.
+- **Missingness** (`apply_missingness`, chosen via `missing_mechanism`):
+  - `MNAR`: logistic model in log-abundance space with per-sample intercept solved via Brent's method for exact target missingness fraction.
+  - `MCAR`: `p_ij = expit(c + s_i)`, independent of all values; `s_i ~ N(0, sample_sd)` models run-to-run variation (set `sample_sd = 0` for textbook MCAR).
+  - `MAR`: as MCAR, but `s_i` also rises with the share of the `top_k` most abundant glycans (never missing, so the driver is always observed) and with group/batch shifts.
+  - `mixed`: shared detection limit (MNAR) with the MAR per-sample shifts, plus abundance-independent dropouts making up `mcar_share` of the missing values.
+  - Defaults (`missing_params`: `mcar_share = 0.13`, `sample_sd = 0.8`, `dominance = 0.35`, `top_k = 3`, `group_sd = 0.2`, `batch_sd = 0`) are calibrated on the 18 `glycowork` glycomics datasets with sufficiently sized replicate groups, so that the same estimators run on templated GlycoForge data reproduce the real per-sample variation, dominance dependence, and between-group variation.
 
 ## Simulation Modes
 
@@ -70,13 +75,14 @@ No real data dependency. Ideal for controlled experiments with known ground trut
 4. Samples clean cohorts via Gaussian copula (LW correlation + empirical marginals) with biological injection along top-K eigenvectors of the pooled covariance, scaled by `bio_strength`
 5. Defines batch effect direction vectors `u_dict` once per simulation run (fixed seed ensures reproducible batch geometry across parameter sweep)
 6. Applies batch effects controlled by `kappa_mu` (shift strength) and `var_b` (variance scaling)
-7. Optionally applies MNAR (Missing Not At Random) missingness:
+7. Optionally applies missingness:
    - `missing_fraction`: proportion of missing values (0.0–1.0)
-   - `mnar_bias`: intensity-dependent bias (default 2.0, range 0.5–5.0)
-   - Left-censored pattern: low-abundance glycans more likely to be missing
+   - `missing_mechanism`: `MNAR` (default), `MCAR`, `MAR` or `mixed`; a list runs a grid over mechanisms
+   - `mnar_bias`: intensity-dependent bias for `MNAR`/`mixed` (default 1.0, range 0.5–5.0)
+   - `missing_params`: overrides for the calibrated mechanism defaults
 8. Grid search over `kappa_mu` and `var_b` produces multiple datasets under identical batch effect structure
 
-**Key parameters:** `n_glycans`, `n_H`, `n_U`, `kappa_mu`, `var_b`, `batch_mode`, `missing_fraction`, `mnar_bias`
+**Key parameters:** `n_glycans`, `n_H`, `n_U`, `kappa_mu`, `var_b`, `batch_mode`, `missing_fraction`, `missing_mechanism`, `mnar_bias`
 
 </details>
 
@@ -107,10 +113,10 @@ Starts from real glycomics data to preserve biological signal structure. Accepts
 9. Samples clean cohorts via Gaussian copula using LW correlation and empirical CLR marginals, with the CLR injection vector shifting unhealthy samples
 10. Defines batch effect direction vectors `u_dict` once per run (fixed seed ensures fair comparison across parameter combinations)
 11. Applies batch effects: in additive mode, `y_batch = y_clean + kappa_mu * sigma * u_b + epsilon`; in multiplicative mode, `y_batch = y_clean + kappa_mu * u_b * y_clean + epsilon`, where variance inflation uses batch-specific scale factors controlled by `var_b`
-12. Optionally applies MNAR missingness (same as Simplified mode)
+12. Optionally applies missingness (same as Simplified mode)
 13. Grid search over `bio_strength`, `k_dir`, `variance_ratio`, `kappa_mu`, `var_b` to systematically test biological signal and batch effect interactions
 
-**Key parameters:** `data_file`, `column_prefix`, `bio_strength`, `k_dir`, `variance_ratio`, `differential_mask`, `winsorize_percentile`, `baseline_method`, `kappa_mu`, `var_b`, `missing_fraction`, `mnar_bias`, `batch_mode`
+**Key parameters:** `data_file`, `column_prefix`, `bio_strength`, `k_dir`, `variance_ratio`, `differential_mask`, `winsorize_percentile`, `baseline_method`, `kappa_mu`, `var_b`, `missing_fraction`, `missing_mechanism`, `mnar_bias`, `batch_mode`
 
 </details>
 
@@ -133,9 +139,9 @@ Generates two glycomic datasets (e.g., _N_- and _O_-glycomics) that share sample
    - Direction matrices `U_A`, `U_B` can be biased toward motif-matching glycans via `coupling_motif_A/B`
 5. Round-trips through `invclr` to restore simplex validity after coupling injection
 6. Applies shared batch labels with independent per-glycome direction vectors (same samples in the same batches, but different glycans affected)
-7. Applies MNAR missingness independently per glycome (independent seeds prevent artificially correlated missing-value patterns)
+7. Applies missingness independently per glycome (independent seeds prevent artificially correlated missing-value patterns; under `MAR`/`mixed` the shared bio and batch labels drive both)
 
-**Key parameters:** `n_glycans_A/B`, `bio_strength_A/B`, `k_dir_A/B`, `variance_ratio_A/B`, `coupling_strength`, `n_coupling_components`, `coupling_motif_A/B`, `kappa_mu`, `var_b`, `missing_fraction`, `mnar_bias`
+**Key parameters:** `n_glycans_A/B`, `bio_strength_A/B`, `k_dir_A/B`, `variance_ratio_A/B`, `coupling_strength`, `n_coupling_components`, `coupling_motif_A/B`, `kappa_mu`, `var_b`, `missing_fraction`, `missing_mechanism`, `mnar_bias`
 
 </details>
 

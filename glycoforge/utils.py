@@ -8,6 +8,7 @@ import re
 from sklearn.decomposition import PCA
 from scipy.stats import f_oneway, shapiro, kruskal
 from scipy.optimize import brentq
+from scipy.special import expit
 from glycowork.motif.graph import subgraph_isomorphism
 from glycowork.glycan_data.loader import remove_unmatched_brackets
 
@@ -158,7 +159,7 @@ def parse_simulation_config(config):
         'differential_mask', 'column_prefix', 'n_batches',
         'kappa_mu', 'var_b', 'winsorize_percentile', 'baseline_method',
         'u_dict', 'random_seeds', 'output_dir', 'verbose', 'save_csv', 'show_pca_plots',
-        'missing_fraction', 'mnar_bias',
+        'missing_fraction', 'mnar_bias', 'missing_mechanism', 'missing_params',
         'glycan_sequences', 'motif_rules', 'motif_bias', 'pair_corr_target',
         'batch_motif_rules', 'batch_motif_bias', 'batch_mode'
     ]
@@ -572,18 +573,38 @@ def check_bio_effect(data_clr, bio_labels, stage_name="", verbose=True):
     }, pc
 
 
-def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=1.0, seed=42, verbose=True):
-    """Apply missing-not-at-random (MNAR) pattern to compositional data.
-    Low-intensity glycans have higher probability of being missing.
+def apply_missingness(Y_compositional, missing_fraction=0.0, mechanism="MNAR", mnar_bias=1.0, missing_params=None, group_labels=None, batch_labels=None, seed=42, verbose=True):
+    """Introduce missing values into compositional data under a chosen missingness mechanism.
     Parameters:
     -----------
     Y_compositional : np.ndarray or pd.DataFrame
-        Compositional data (samples x glycans), values in percentage or proportions
+        Compositional data (glycans x samples, the pipeline convention), values in percentage or proportions
     missing_fraction : float
         Target fraction of missing values (0.0 to 1.0)
+    mechanism : str
+        'MNAR': left-censoring by detection limit; low-intensity values are more likely to be missing, every sample
+            loses the same expected fraction.
+        'MCAR': missingness independent of all values (sporadic dropouts), with random per-sample variation.
+        'MAR': missingness independent of the missing value itself but driven by observed sample information:
+            the share of the top_k most abundant glycans (always observed; dynamic-range losses), group_labels and batch_labels.
+        'mixed': the realistic composite: a shared detection limit (MNAR) whose per-sample shifts follow the MAR drivers,
+            plus abundance-independent dropouts that make up mcar_share of the missing values.
     mnar_bias : float
-        Intensity bias parameter. Higher values = stronger bias toward low intensity.
+        Intensity bias for 'MNAR' and 'mixed'. Higher values = stronger bias toward low intensity.
         Typical range: 0.5 (weak) to 5.0 (very strong). Default 1.0.
+    missing_params : dict or None
+        Overrides for the defaults below, calibrated on the glycowork glycomics datasets with >= 20 glycans, replicate
+        groups of >= 3 samples and a non-degenerate MNAR fit: mcar_share is their median; the logit-scale parameters were
+        tuned so that the same estimators, run on templated GlycoForge data, reproduce the real medians of excess
+        per-sample variation (0.72), dominance slope (0.26) and between-group variation:
+        mcar_share (0.13): share of missing values that are abundance-independent dropouts ('mixed')
+        sample_sd (0.8): SD of random per-sample logit shifts ('MCAR', 'MAR', 'mixed'); 0 gives textbook MCAR
+        dominance (0.35): logit increase per SD of the top_k share ('MAR', 'mixed')
+        top_k (3): most abundant glycans defining dominance; never missing under 'MAR'
+        group_sd (0.2): SD of per-group logit shifts ('MAR', 'mixed'; needs group_labels)
+        batch_sd (0.0): SD of per-batch logit shifts ('MAR', 'mixed'; needs batch_labels); not estimable from public datasets
+    group_labels, batch_labels : array-like or None
+        Per-sample labels (in column order) used by 'MAR' and 'mixed' and reported in the diagnostics
     seed : int
         Random seed for reproducibility
     verbose : bool
@@ -591,14 +612,16 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=1.0,
     Returns:
     --------
     Y_missing : pd.DataFrame or np.ndarray
-        Data with NaN for missing values
+        Data with NaN for missing values (glycans x samples)
     Y_missing_clr : pd.DataFrame or np.ndarray
         CLR-transformed data (imputed before CLR)
     missing_mask : np.ndarray
-        Boolean mask (True = missing)
+        Boolean mask (True = missing), glycans x samples
     diagnostics : dict
         Missingness statistics
     """
+    if mechanism not in ("MNAR", "MCAR", "MAR", "mixed"):
+        raise ValueError(f"mechanism must be 'MNAR', 'MCAR', 'MAR' or 'mixed', got '{mechanism}'")
     if missing_fraction <= 0:
         if verbose:
             print("Missingness disabled (missing_fraction=0)")
@@ -606,37 +629,77 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=1.0,
         if isinstance(Y_compositional, pd.DataFrame):
             Y_clr = pd.DataFrame(Y_clr, index=Y_compositional.index, columns=Y_compositional.columns)
         return Y_compositional, Y_clr, np.zeros(Y_compositional.shape, dtype=bool), {}
+    params = {'mcar_share': 0.13, 'sample_sd': 0.8, 'dominance': 0.35, 'top_k': 3, 'group_sd': 0.2, 'batch_sd': 0.0, **(missing_params or {})}
     rng = np.random.default_rng(seed)
     is_df = isinstance(Y_compositional, pd.DataFrame)
-    Y = Y_compositional.values if is_df else Y_compositional
+    # Internally samples x glycans
+    Y = np.asarray(Y_compositional.values if is_df else Y_compositional, dtype=float).T
     n_samples, n_glycans = Y.shape
     missing_mask = np.zeros_like(Y, dtype=bool)
+    f_mnar = missing_fraction * {"MNAR": 1.0, "mixed": 1.0 - params['mcar_share']}.get(mechanism, 0.0)
+    f_rand = missing_fraction - f_mnar
+    # Per-sample logit shifts s_i: in real glycomics data, per-sample missingness varies more than chance
+    # (run-to-run variation, independent of values). Under MAR and mixed, s_i also rises with the share of the top_k
+    # glycans (samples dominated by a few glycans lose more minor peaks; positive in 13/18 datasets) plus group/batch
+    # shifts; under MAR the top_k glycans are never missing, so this driver is always observed.
+    s = np.zeros(n_samples) if mechanism == "MNAR" else rng.normal(0.0, params['sample_sd'], n_samples)
+    eligible = np.ones_like(missing_mask)
+    if mechanism in ("MAR", "mixed"):
+        top = np.argsort(Y.mean(axis=0))[-int(params['top_k']):]
+        if mechanism == "MAR":
+            eligible[:, top] = False
+        share = Y[:, top].sum(axis=1) / np.maximum(Y.sum(axis=1), 1e-10)
+        s += params['dominance'] * (share - share.mean()) / (share.std() + 1e-10)
+        for labels, sd in ((group_labels, params['group_sd']), (batch_labels, params['batch_sd'])):
+            if labels is not None and sd > 0:
+                levels, codes = np.unique(np.asarray(labels), return_inverse=True)
+                s += rng.normal(0.0, sd, len(levels))[codes]
     # MNAR missingness via logistic in log-abundance space.
     # For each sample i, the per-glycan missing probability is:
     #   p(missing | x_ij) = 1 / (1 + exp(a_i + b * log(x_ij)))
     # where b = mnar_bias controls the steepness of the intensity-detection
     # relationship, and a_i is a per-sample intercept solved numerically so
     # that mean_j(p_ij) = missing_fraction exactly.
-    for i in range(n_samples):
-        log_x = np.log(np.maximum(Y[i, :], 1e-10))
-        # Find a_i such that mean(1 / (1 + exp(a + b*log_x))) = missing_fraction.
-        def mean_missing(a):
-            return np.mean(1.0 / (1.0 + np.exp(a + mnar_bias * log_x))) - missing_fraction
-        # Bracket: large negative a → all missing (mean≈1), large positive → none missing (mean≈0)
+    if mechanism == "MNAR":
+        for i in range(n_samples):
+            log_x = np.log(np.maximum(Y[i, :], 1e-10))
+            # Find a_i such that mean(1 / (1 + exp(a + b*log_x))) = missing_fraction.
+            def mean_missing(a):
+                return np.mean(1.0 / (1.0 + np.exp(a + mnar_bias * log_x))) - missing_fraction
+            # Bracket: large negative a → all missing (mean≈1), large positive → none missing (mean≈0)
+            try:
+                a_i = brentq(mean_missing, -50, 50, xtol = 1e-6)
+            except ValueError:
+                # Fallback if target is outside achievable range for this sample
+                a_i = 0.0
+            prob_missing = 1.0 / (1.0 + np.exp(a_i + mnar_bias * log_x))
+            missing_mask[i, :] = rng.random(n_glycans) < prob_missing
+    elif mechanism == "mixed":
+        # Real detection limit: one shared intercept, so samples whose minor glycans sit lower lose more of them,
+        # shifted per sample by s_i; abundance-independent dropouts (mcar_share of the total) are added below
+        lin = mnar_bias * np.log(np.maximum(Y, 1e-10)) - s[:, None]
         try:
-            a_i = brentq(mean_missing, -50, 50, xtol = 1e-6)
+            a = brentq(lambda a: np.mean(expit(-(a + lin))) - f_mnar, -50, 50, xtol = 1e-6)
         except ValueError:
-            # Fallback if target is outside achievable range for this sample
-            a_i = 0.0
-        prob_missing = 1.0 / (1.0 + np.exp(a_i + mnar_bias * log_x))
-        missing_mask[i, :] = rng.random(n_glycans) < prob_missing
+            a = -50.0
+        missing_mask = rng.random(Y.shape) < expit(-(a + lin))
+    # Abundance-independent missingness (MCAR, MAR, dropouts in mixed): p_ij = expit(c + s_i) on eligible cells,
+    # with c solved so the expected count hits f_rand
+    if f_rand > 0:
+        eligible &= ~missing_mask
+        n_target = min(f_rand * Y.size, eligible.sum())
+        try:
+            c = brentq(lambda c: np.sum(eligible * expit(c + s)[:, None]) - n_target, -50, 50, xtol = 1e-6)
+        except ValueError:
+            c = 50.0
+        missing_mask |= eligible & (rng.random(Y.shape) < expit(c + s)[:, None])
     # Apply missingness
-    Y_missing = Y.copy().astype(float)
+    Y_missing = Y.copy()
     Y_missing[missing_mask] = np.nan
     # Compute CLR with imputation
     Y_for_clr = Y.copy()
     Y_for_clr[missing_mask] = 1e-6
-    Y_missing_clr = clr(Y_for_clr.T).T
+    Y_missing_clr = clr(Y_for_clr)
     # Diagnostics
     intensity_bins = [0, 0.01, 0.1, 1.0, np.inf]
     bin_labels = ['<0.01%', '0.01-0.1%', '0.1-1%', '>1%']
@@ -648,26 +711,35 @@ def apply_mnar_missingness(Y_compositional, missing_fraction=0.0, mnar_bias=1.0,
             missing_by_intensity[bin_labels[b_idx]] = float(missing_rate)
     per_sample_missing = np.sum(missing_mask, axis=1)
     diagnostics = {
+        'mechanism': mechanism,
         'total_missing': int(np.sum(missing_mask)),
         'missing_fraction_actual': float(np.sum(missing_mask) / Y.size),
         'missing_fraction_target': float(missing_fraction),
         'per_sample_missing': per_sample_missing.tolist(),
         'missing_rate_by_intensity': missing_by_intensity,
-        'mnar_bias': float(mnar_bias)
+        'mnar_bias': float(mnar_bias),
+        'missing_params': {k: float(v) for k, v in params.items()}
     }
+    for key, labels in (('missing_rate_by_group', group_labels), ('missing_rate_by_batch', batch_labels)):
+        if labels is not None:
+            labels = np.asarray(labels)
+            diagnostics[key] = {str(g): float(missing_mask[labels == g].mean()) for g in np.unique(labels)}
     if verbose:
         print(f"\n{'='*60}")
-        print(f"MNAR MISSINGNESS APPLIED")
+        print(f"{mechanism} MISSINGNESS APPLIED")
         print(f"{'='*60}")
         print(f"Target fraction: {missing_fraction:.1%}")
         print(f"Actual fraction: {diagnostics['missing_fraction_actual']:.1%}")
         print(f"Total missing: {diagnostics['total_missing']}/{Y.size}")
-        print(f"MNAR bias: {mnar_bias}")
+        if mechanism in ("MNAR", "mixed"):
+            print(f"MNAR bias: {mnar_bias}")
         print(f"\nMissing rate by intensity:")
         for bin_label, rate in missing_by_intensity.items():
             print(f"  {bin_label:>12}: {rate:.1%}")
         print(f"{'='*60}\n")
     if is_df:
-        Y_missing = pd.DataFrame(Y_missing, index=Y_compositional.index, columns=Y_compositional.columns)
-        Y_missing_clr = pd.DataFrame(Y_missing_clr, index=Y_compositional.index, columns=Y_compositional.columns)
-    return Y_missing, Y_missing_clr, missing_mask, diagnostics
+        Y_missing = pd.DataFrame(Y_missing.T, index=Y_compositional.index, columns=Y_compositional.columns)
+        Y_missing_clr = pd.DataFrame(Y_missing_clr.T, index=Y_compositional.index, columns=Y_compositional.columns)
+    else:
+        Y_missing, Y_missing_clr = Y_missing.T, Y_missing_clr.T
+    return Y_missing, Y_missing_clr, missing_mask.T, diagnostics
