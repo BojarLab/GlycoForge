@@ -1,6 +1,7 @@
 import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
-warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
+
+warnings.filterwarnings("ignore", category = DeprecationWarning, module = "pkg_resources")
+warnings.filterwarnings("ignore", message = "pkg_resources is deprecated")
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -11,84 +12,90 @@ from scipy.optimize import brentq
 from scipy.special import expit
 from glycowork.motif.graph import subgraph_isomorphism
 from glycowork.glycan_data.loader import remove_unmatched_brackets
-
+from glycowork.glycan_data.stats import impute_biosynthetic, pvca
 
 _network_cache = {}
 
 
-def find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose=False, prefix=""):
-  """Identify substrate-product pairs using glycowork's biosynthetic network.
-  More robust than string matching since it respects biosynthetic relationships.
-  Network is cached based on glycan sequences to avoid expensive reconstruction.
-  Returns: {'substrates': [indices that decrease], 'products': [indices that increase],
-            'unpaired_up': [unpaired increasing], 'unpaired_down': [unpaired decreasing]}"""
-  from glycowork.network.biosynthesis import construct_network
-  from glycowork.motif.processing import canonicalize_iupac
-  
-  # Early return for empty motif_rules to avoid UnboundLocalError
-  if not motif_rules:
-    return {'substrates': [], 'products': [], 'unpaired_up': [], 'unpaired_down': []}
-  
-  cache_key = tuple(glycan_sequences)
-  if cache_key not in _network_cache:
-    try:
-      network = construct_network(glycan_sequences)
-      _network_cache[cache_key] = network
-      if verbose:
-        print(f"  {prefix}Constructed and cached network with {len(network.nodes())} nodes, {len(network.edges())} edges")
-    except Exception as e:
-      if verbose:
-        print(f"  {prefix}Warning: construct_network failed ({e}), falling back to string matching")
-      _network_cache[cache_key] = None
-      return None
-  else:
-    network = _network_cache[cache_key]
-    if network is None:
-      return None
-    if verbose:
-      print(f"  {prefix}Using cached network with {len(network.nodes())} nodes, {len(network.edges())} edges")
-  real_nodes = [node for node in network.nodes() if network.nodes[node].get('virtual', 0) == 0]
-  # construct_network canonicalizes its input, so node names are canonical IUPAC while
-  # glycan_sequences may not be; indexing on the raw string silently misses every pair.
-  canon_pos = {}
-  for _i, _g in enumerate(glycan_sequences):
-      canon_pos.setdefault(canonicalize_iupac(_g), _i)
-  substrates, products = [], []
-  for motif, direction in motif_rules.items():
-    is_loss = direction.lower() in ["down", "downregulate", "decrease"]
-    is_gain = direction.lower() in ["up", "upregulate", "increase"]
-    for u, v, data in network.edges(data=True):
-      edge_label = data.get('diffs', '')
-      if motif in edge_label and u in real_nodes and v in real_nodes:
+def find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose = False, prefix = ""):
+    """Identify substrate-product pairs using glycowork's biosynthetic network.
+    More robust than string matching since it respects biosynthetic relationships.
+    Network is cached based on glycan sequences to avoid expensive reconstruction.
+    Returns: {'substrates': [indices that decrease], 'products': [indices that increase],
+              'unpaired_up': [unpaired increasing], 'unpaired_down': [unpaired decreasing]}"""
+    from glycowork.network.biosynthesis import construct_network
+    from glycowork.motif.processing import canonicalize_iupac
+
+    # Early return for empty motif_rules to avoid UnboundLocalError
+    if not motif_rules:
+        return {'substrates': [], 'products': [], 'unpaired_up': [], 'unpaired_down': []}
+
+    cache_key = tuple(glycan_sequences)
+    if cache_key not in _network_cache:
         try:
-          u_idx = canon_pos[u]
-          v_idx = canon_pos[v]
-          if is_loss:
-            substrates.append(v_idx)
-            products.append(u_idx)
-          elif is_gain:
-            substrates.append(u_idx)
-            products.append(v_idx)
-          if verbose:
-            direction_str = "↓" if is_loss else "↑"
-            print(f"  {prefix}network pair: [{u_idx}] {u} ↔ [{v_idx}] {v} (edge: {edge_label}, {motif} {direction_str})")
-        except KeyError:
-          pass
-  paired_set = set(substrates) | set(products)
-  unpaired_up, unpaired_down = [], []
-  for motif, direction in motif_rules.items():
-      is_loss = direction.lower() in ["down", "downregulate", "decrease"]
-      is_gain = direction.lower() in ["up", "upregulate", "increase"]
-      for idx, seq in enumerate(glycan_sequences):
-          if idx not in paired_set and subgraph_isomorphism(seq, motif):
-              if is_loss:
-                  unpaired_down.append(idx)
-              elif is_gain:
-                  unpaired_up.append(idx)
-  return {'substrates': substrates, 'products': products, 'unpaired_up': unpaired_up, 'unpaired_down': unpaired_down}
+            network = construct_network(glycan_sequences)
+            _network_cache[cache_key] = network
+            if verbose:
+                print(
+                    f"  {prefix}Constructed and cached network with {len(network.nodes())} nodes, {len(network.edges())} edges")
+        except Exception as e:
+            if verbose:
+                print(f"  {prefix}Warning: construct_network failed ({e}), falling back to string matching")
+            _network_cache[cache_key] = None
+            return None
+    else:
+        network = _network_cache[cache_key]
+        if network is None:
+            return None
+        if verbose:
+            print(f"  {prefix}Using cached network with {len(network.nodes())} nodes, {len(network.edges())} edges")
+    real_nodes = [node for node in network.nodes() if network.nodes[node].get('virtual', 0) == 0]
+    # construct_network canonicalizes its input, so node names are canonical IUPAC while
+    # glycan_sequences may not be; indexing on the raw string silently misses every pair.
+    canon_pos = {}
+    for _i, _g in enumerate(glycan_sequences):
+        canon_pos.setdefault(canonicalize_iupac(_g), _i)
+    substrates, products = [], []
+    for motif, direction in motif_rules.items():
+        is_loss = direction.lower() in ["down", "downregulate", "decrease"]
+        is_gain = direction.lower() in ["up", "upregulate", "increase"]
+        for u, v, data in network.edges(data = True):
+            edge_label = data.get('diffs', '')
+            # substring-matching edge_label ('Neu5Ac(a2-3)') missed every motif with an acceptor and took trimming edges as pairs
+            if u in real_nodes and v in real_nodes and subgraph_isomorphism(v, motif,
+                                                                            count = True) > subgraph_isomorphism(u,
+                                                                                                                 motif,
+                                                                                                                 count = True):
+                try:
+                    u_idx = canon_pos[u]
+                    v_idx = canon_pos[v]
+                    if is_loss:
+                        substrates.append(v_idx)
+                        products.append(u_idx)
+                    elif is_gain:
+                        substrates.append(u_idx)
+                        products.append(v_idx)
+                    if verbose:
+                        direction_str = "↓" if is_loss else "↑"
+                        print(
+                            f"  {prefix}network pair: [{u_idx}] {u} ↔ [{v_idx}] {v} (edge: {edge_label}, {motif} {direction_str})")
+                except KeyError:
+                    pass
+    paired_set = set(substrates) | set(products)
+    unpaired_up, unpaired_down = [], []
+    for motif, direction in motif_rules.items():
+        is_loss = direction.lower() in ["down", "downregulate", "decrease"]
+        is_gain = direction.lower() in ["up", "upregulate", "increase"]
+        for idx, seq in enumerate(glycan_sequences):
+            if idx not in paired_set and subgraph_isomorphism(seq, motif):
+                if is_loss:
+                    unpaired_down.append(idx)
+                elif is_gain:
+                    unpaired_up.append(idx)
+    return {'substrates': substrates, 'products': products, 'unpaired_up': unpaired_up, 'unpaired_down': unpaired_down}
 
 
-def identify_motif_counterpart(glycan_sequence, motif="Neu5Ac"):
+def identify_motif_counterpart(glycan_sequence, motif = "Neu5Ac"):
     """Remove terminal motif and its linkage to get product.
     Returns the product structure or None if motif not found."""
     if not subgraph_isomorphism(glycan_sequence, motif):
@@ -107,15 +114,16 @@ def identify_motif_counterpart(glycan_sequence, motif="Neu5Ac"):
     return None
 
 
-def find_compositional_pairs(glycan_sequences, motif_rules, verbose=False, prefix=""):
+def find_compositional_pairs(glycan_sequences, motif_rules, verbose = False, prefix = ""):
     """Identify substrate-product pairs for compositional batch/bio effects.
     Tries network-based approach first (robust), falls back to string matching if needed.
     Returns: {'substrates': [indices], 'products': [indices], 'unpaired_up': [indices], 'unpaired_down': [indices]}"""
-    network_result = find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose=verbose, prefix=prefix)
+    network_result = find_compositional_pairs_from_network(glycan_sequences, motif_rules, verbose = verbose,
+                                                           prefix = prefix)
     if network_result is not None:
-      return network_result
+        return network_result
     if verbose:
-      print(f"  {prefix}Using string-matching fallback")
+        print(f"  {prefix}Using string-matching fallback")
     substrates, products, unpaired_up, unpaired_down = [], [], [], []
     for motif, direction in motif_rules.items():
         motif_dir = direction.lower()
@@ -233,7 +241,7 @@ def _parse_batch_effect_direction(bed_config, affected_fraction, positive_prob, 
     return manual_config, auto_params
 
 
-def clr(x, eps=1e-6):
+def clr(x, eps = 1e-6):
     """Centered log-ratio transformation for compositional data.
     Parameters:
     -----------
@@ -246,7 +254,7 @@ def clr(x, eps=1e-6):
     clr_transformed : np.ndarray
         CLR-transformed data with same shape as input.
     """
-    x = np.asarray(x, dtype=float)
+    x = np.asarray(x, dtype = float)
     # Handle zeros by replacing with small epsilon
     x_safe = np.where(x <= 0, eps, x)
     # Standard CLR: log(x) - geometric_mean(log(x))
@@ -257,29 +265,30 @@ def clr(x, eps=1e-6):
         return log_x - geom_mean_log
     else:
         # Multiple samples: subtract mean across features for each sample (axis=1)
-        geom_mean_log = np.mean(log_x, axis=1, keepdims=True)
+        geom_mean_log = np.mean(log_x, axis = 1, keepdims = True)
         return log_x - geom_mean_log
 
 
-def invclr(z, to_percent=True, eps=1e-6):
-    z = np.asarray(z, dtype=float)
-    z = z - np.mean(z)               # Center to ensure proper simplex
-    z = z - np.max(z)                # Numerical stability
+def invclr(z, to_percent = True, eps = 1e-6):
+    z = np.asarray(z, dtype = float)
+    z = z - np.mean(z)  # Center to ensure proper simplex
+    z = z - np.max(z)  # Numerical stability
     x = np.exp(z)
-    x = np.maximum(x, eps)           # Prevent zeros
-    x = x / np.sum(x)                # Normalize to 1
+    x = np.maximum(x, eps)  # Prevent zeros
+    x = x / np.sum(x)  # Normalize to 1
     if to_percent:
         x *= 100
     return x
 
 
 # Plot PCA for clean and simulated data
-def plot_pca(data, #DataFrame (features x samples)
-             bio_groups=None, # dict or None, e.g. {'healthy': ['healthy_1', 'healthy_2'], 'unhealthy': ['unhealthy_1']}
-             batch_groups=None,
-             title="PCA",
-             save_path=None):
-    pca = PCA(n_components=2)
+def plot_pca(data,  # DataFrame (features x samples)
+             bio_groups = None,
+             # dict or None, e.g. {'healthy': ['healthy_1', 'healthy_2'], 'unhealthy': ['unhealthy_1']}
+             batch_groups = None,
+             title = "PCA",
+             save_path = None):
+    pca = PCA(n_components = 2)
     pca_result = pca.fit_transform(data.T)
     sample_names = data.columns.tolist()
 
@@ -302,7 +311,7 @@ def plot_pca(data, #DataFrame (features x samples)
     n_plots = sum([bio_groups is not None, batch_groups is not None])
     if n_plots == 0:
         return
-    fig, axes = plt.subplots(1, n_plots, figsize=(6*n_plots, 5))
+    fig, axes = plt.subplots(1, n_plots, figsize = (6 * n_plots, 5))
     axes = [axes] if n_plots == 1 else axes
     plot_idx = 0
     # Plot biological groups (with batch annotations)
@@ -311,18 +320,18 @@ def plot_pca(data, #DataFrame (features x samples)
         for i, (group_name, cols) in enumerate(bio_groups.items()):
             indices = [sample_names.index(c) for c in cols if c in sample_names]
             axes[plot_idx].scatter(pca_result[indices, 0], pca_result[indices, 1],
-                                  c=bio_colors[i % len(bio_colors)], label=group_name, alpha=0.7, s=50)
+                                   c = bio_colors[i % len(bio_colors)], label = group_name, alpha = 0.7, s = 50)
             # Add batch annotations on bio-colored plot
             for idx in indices:
                 batch_label = get_batch_label(sample_names[idx])
                 if batch_label:
                     axes[plot_idx].annotate(batch_label, (pca_result[idx, 0], pca_result[idx, 1]),
-                                          xytext=(2, 2), textcoords='offset points', fontsize=8, alpha=0.7)
+                                            xytext = (2, 2), textcoords = 'offset points', fontsize = 8, alpha = 0.7)
         axes[plot_idx].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
         axes[plot_idx].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
         axes[plot_idx].set_title(f'{title}\n(colored by bio-groups)')
         axes[plot_idx].legend()
-        axes[plot_idx].grid(alpha=0.3)
+        axes[plot_idx].grid(alpha = 0.3)
         plot_idx += 1
     # Plot batch groups (with bio annotations)
     if batch_groups is not None:
@@ -330,28 +339,29 @@ def plot_pca(data, #DataFrame (features x samples)
         for i, (batch_id, cols) in enumerate(sorted(batch_groups.items())):
             indices = [sample_names.index(c) for c in cols if c in sample_names]
             axes[plot_idx].scatter(pca_result[indices, 0], pca_result[indices, 1],
-                                  c=batch_colors[i % len(batch_colors)], label=f'Batch {batch_id}', alpha=0.7, s=50)
+                                   c = batch_colors[i % len(batch_colors)], label = f'Batch {batch_id}', alpha = 0.7,
+                                   s = 50)
             # Add bio annotations on batch-colored plot
             for idx in indices:
                 bio_label = get_bio_label(sample_names[idx])
                 if bio_label:
                     axes[plot_idx].annotate(bio_label, (pca_result[idx, 0], pca_result[idx, 1]),
-                                          xytext=(2, 2), textcoords='offset points', fontsize=8, alpha=0.7)
+                                            xytext = (2, 2), textcoords = 'offset points', fontsize = 8, alpha = 0.7)
         axes[plot_idx].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
         axes[plot_idx].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
         axes[plot_idx].set_title(f'{title}\n(colored by batches)')
         axes[plot_idx].legend()
-        axes[plot_idx].grid(alpha=0.3)
+        axes[plot_idx].grid(alpha = 0.3)
     plt.tight_layout()
     if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path, dpi = 300, bbox_inches = 'tight')
     plt.show()
 
 
 def _compute_pca_and_stats(data):
     """Compute PCA and return PC, variance explained, and normality test result."""
     X = np.asarray(data).T
-    pca = PCA(n_components=min(5, X.shape[0]-1))
+    pca = PCA(n_components = min(5, X.shape[0] - 1))
     pc = pca.fit_transform(X)
     var_explained = pca.explained_variance_ratio_[:2].sum()
     total_samples = len(pc[:, 0])
@@ -360,10 +370,10 @@ def _compute_pca_and_stats(data):
     return pc, var_explained, total_samples, norm_p, X
 
 
-def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samples, verbose=False):
+def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samples, verbose = False):
     """Calculate bio effect with centroid_distance and strength assessment."""
     bio_cat = pd.Categorical(bio_labels)
-    pc1_by_bio = [pc[bio_cat==g, 0] for g in bio_cat.categories]
+    pc1_by_bio = [pc[bio_cat == g, 0] for g in bio_cat.categories]
     # Statistical test
     if test_used == "Kruskal-Wallis":
         f_bio, p_bio = kruskal(*pc1_by_bio)
@@ -371,14 +381,14 @@ def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samp
         f_bio, p_bio = f_oneway(*pc1_by_bio)
     # Effect size (eta²)
     if test_used == "ANOVA":
-        ss_bio_between = sum([len(group) * (np.mean(group) - np.mean(pc[:, 0]))**2
-                             for group in pc1_by_bio])
+        ss_bio_between = sum([len(group) * (np.mean(group) - np.mean(pc[:, 0])) ** 2
+                              for group in pc1_by_bio])
         bio_eta = ss_bio_between / ss_total if ss_total > 0 else 0
     else:
-        bio_eta = (f_bio - len(bio_cat.categories) + 1) / (total_samples - len(bio_cat.categories) + 1)
+        bio_eta = (f_bio - len(bio_cat.categories) + 1) / (total_samples - len(bio_cat.categories))
         bio_eta = max(0, min(1, bio_eta))
     # Centroid distance
-    centroids = [pc[bio_cat==b, :2].mean(axis=0) for b in bio_cat.categories]
+    centroids = [pc[bio_cat == b, :2].mean(axis = 0) for b in bio_cat.categories]
     centroid_dist = np.linalg.norm(centroids[0] - centroids[1]) if len(centroids) == 2 else 0
     # Strength assessment
     if p_bio >= 0.05:
@@ -408,151 +418,118 @@ def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samp
     }
 
 
-def pvca_variance_decomposition(data, batch_labels, bio_labels, n_components=10):
-  X = np.asarray(data).T
-  pca = PCA(n_components=min(n_components, X.shape[0]-1, X.shape[1]))
-  pc_scores = pca.fit_transform(X)
-  variance_explained = pca.explained_variance_ratio_
-  batch_variance = 0
-  bio_variance = 0
-  residual_variance = 0
-  for i in range(pc_scores.shape[1]):
-    pc = pc_scores[:, i]
-    weight = variance_explained[i]
-    ss_total = np.sum((pc - np.mean(pc))**2)
-    if ss_total < 1e-10:
-      continue
-    batch_means = np.array([np.mean(pc[batch_labels == b]) for b in np.unique(batch_labels)])
-    batch_counts = np.array([np.sum(batch_labels == b) for b in np.unique(batch_labels)])
-    ss_batch = np.sum(batch_counts * (batch_means - np.mean(pc))**2)
-    bio_means = np.array([np.mean(pc[bio_labels == b]) for b in np.unique(bio_labels)])
-    bio_counts = np.array([np.sum(bio_labels == b) for b in np.unique(bio_labels)])
-    ss_bio = np.sum(bio_counts * (bio_means - np.mean(pc))**2)
-    ss_residual = max(0, ss_total - ss_batch - ss_bio)
-    batch_variance += (ss_batch / ss_total) * weight
-    bio_variance += (ss_bio / ss_total) * weight
-    residual_variance += (ss_residual / ss_total) * weight
-  total = batch_variance + bio_variance + residual_variance
-  if total < 1e-10:
-    return {'batch_variance_pct': 0.0, 'bio_variance_pct': 0.0, 'residual_variance_pct': 0.0}
-  return {
-    'batch_variance_pct': (batch_variance / total) * 100,
-    'bio_variance_pct': (bio_variance / total) * 100,
-    'residual_variance_pct': (residual_variance / total) * 100
-  }
-
-
-def check_batch_effect(data, batch_labels, bio_groups=None, verbose=True):
-  pc, var_explained, total_samples, norm_p, X = _compute_pca_and_stats(data)
-  # Handle both bio_groups (dict) and bio_labels (array) inputs
-  if bio_groups is not None:
-    if isinstance(bio_groups, dict):
-      # Convert bio_groups dict to bio_labels array
-      bio_labels = np.zeros(len(data.columns), dtype=int)
-      for group_id, (group_name, cols) in enumerate(bio_groups.items()):
-        for col in cols:
-          if col in data.columns:
-            col_idx = data.columns.get_loc(col)
-            bio_labels[col_idx] = group_id
-      bio_groups_dict = bio_groups
+def check_batch_effect(data, batch_labels, bio_groups = None, verbose = True):
+    pc, var_explained, total_samples, norm_p, X = _compute_pca_and_stats(data)
+    # Handle both bio_groups (dict) and bio_labels (array) inputs
+    if bio_groups is not None:
+        if isinstance(bio_groups, dict):
+            # Convert bio_groups dict to bio_labels array
+            bio_labels = np.zeros(len(data.columns), dtype = int)
+            for group_id, (group_name, cols) in enumerate(bio_groups.items()):
+                for col in cols:
+                    if col in data.columns:
+                        col_idx = data.columns.get_loc(col)
+                        bio_labels[col_idx] = group_id
+            bio_groups_dict = bio_groups
+        else:
+            # Already bio_labels array, keep it
+            bio_labels = bio_groups
+            bio_groups_dict = None
     else:
-      # Already bio_labels array, keep it
-      bio_labels = bio_groups
-      bio_groups_dict = None
-  else:
-    bio_labels = None
-    bio_groups_dict = None
-  # PVCA as primary metric
-  if bio_labels is not None:
-    pvca_results = pvca_variance_decomposition(data, batch_labels, bio_labels, n_components=10)
-    batch_var_pct = pvca_results['batch_variance_pct']
-    bio_var_pct = pvca_results['bio_variance_pct']
-    residual_var_pct = pvca_results['residual_variance_pct']
-    if verbose:
-      print(f"PC1-10 explain {var_explained:.1%} variance")
-      print(f"\nPVCA Variance Decomposition (across {min(10, X.shape[1])} PCs):")
-      print(f"  Batch:     {batch_var_pct:.1f}%")
-      print(f"  Biological: {bio_var_pct:.1f}%")
-      print(f"  Residual:   {residual_var_pct:.1f}%")
-    # Severity classification based on PVCA
-    if batch_var_pct < 5:
-      severity = "NONE"
-      severity_description = f"Negligible batch effect (batch explains {batch_var_pct:.1f}% of variance)"
-    elif batch_var_pct < bio_var_pct:
-      if batch_var_pct < 10:
-        severity = "GOOD"
-        severity_description = f"Biological signal dominates (bio {bio_var_pct:.1f}% vs batch {batch_var_pct:.1f}%)"
-      else:
-        severity = "MILD"
-        severity_description = f"Minor batch effect present but biology dominates (bio {bio_var_pct:.1f}% vs batch {batch_var_pct:.1f}%)"
+        bio_labels = None
+        bio_groups_dict = None
+    # PVCA as primary metric
+    if bio_labels is not None:
+        pvca_results = {f"{k}_variance_pct": v for k, v in
+                        pvca(data, {'batch': batch_labels, 'bio': bio_labels}).items()}
+        batch_var_pct = pvca_results['batch_variance_pct']
+        bio_var_pct = pvca_results['bio_variance_pct']
+        residual_var_pct = pvca_results['residual_variance_pct']
+        if verbose:
+            print(f"PC1-2 explain {var_explained:.1%} variance")
+            print(f"\nPVCA Variance Decomposition (across {min(10, X.shape[1])} PCs):")
+            print(f"  Batch:     {batch_var_pct:.1f}%")
+            print(f"  Biological: {bio_var_pct:.1f}%")
+            print(f"  Residual:   {residual_var_pct:.1f}%")
+        # Severity classification based on PVCA
+        if batch_var_pct < 5:
+            severity = "NONE"
+            severity_description = f"Negligible batch effect (batch explains {batch_var_pct:.1f}% of variance)"
+        elif batch_var_pct < bio_var_pct:
+            if batch_var_pct < 10:
+                severity = "GOOD"
+                severity_description = f"Biological signal dominates (bio {bio_var_pct:.1f}% vs batch {batch_var_pct:.1f}%)"
+            else:
+                severity = "MILD"
+                severity_description = f"Minor batch effect present but biology dominates (bio {bio_var_pct:.1f}% vs batch {batch_var_pct:.1f}%)"
+        else:
+            if batch_var_pct > 30:
+                severity = "CRITICAL"
+                severity_description = f"Severe batch effect overwhelms signal (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
+            elif batch_var_pct > 20:
+                severity = "MODERATE"
+                severity_description = f"Substantial batch effect (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
+            else:
+                severity = "WARNING"
+                severity_description = f"Batch effect exceeds biological signal (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
+        if verbose:
+            print(f"\nOverall Quality: {severity} - {severity_description}")
+    # PC1 analysis as secondary/confirmatory metric
+    batch_cat = pd.Categorical(batch_labels)
+    pc1_by_batch = [pc[batch_cat == b, 0] for b in batch_cat.categories]
+    if total_samples < 30 or norm_p < 0.05:
+        f_stat, p_val = kruskal(*pc1_by_batch)
+        test_used = "Kruskal-Wallis"
     else:
-      if batch_var_pct > 30:
-        severity = "CRITICAL"
-        severity_description = f"Severe batch effect overwhelms signal (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
-      elif batch_var_pct > 20:
-        severity = "MODERATE"
-        severity_description = f"Substantial batch effect (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
-      else:
-        severity = "WARNING"
-        severity_description = f"Batch effect exceeds biological signal (batch {batch_var_pct:.1f}% vs bio {bio_var_pct:.1f}%)"
+        f_stat, p_val = f_oneway(*pc1_by_batch)
+        test_used = "ANOVA"
+    ss_total = np.var(pc[:, 0]) * (len(pc[:, 0]) - 1)
+    if test_used == "ANOVA":
+        ss_between = sum([len(group) * (np.mean(group) - np.mean(pc[:, 0])) ** 2 for group in pc1_by_batch])
+        batch_eta = ss_between / ss_total if ss_total > 0 else 0
+    else:
+        batch_eta = (f_stat - len(batch_cat.categories) + 1) / (total_samples - len(batch_cat.categories))
+        batch_eta = max(0, min(1, batch_eta))
     if verbose:
-      print(f"\nOverall Quality: {severity} - {severity_description}")
-  # PC1 analysis as secondary/confirmatory metric
-  batch_cat = pd.Categorical(batch_labels)
-  pc1_by_batch = [pc[batch_cat==b, 0] for b in batch_cat.categories]
-  if total_samples < 30 or norm_p < 0.05:
-    f_stat, p_val = kruskal(*pc1_by_batch)
-    test_used = "Kruskal-Wallis"
-  else:
-    f_stat, p_val = f_oneway(*pc1_by_batch)
-    test_used = "ANOVA"
-  ss_total = np.var(pc[:, 0]) * (len(pc[:, 0]) - 1)
-  if test_used == "ANOVA":
-    ss_between = sum([len(group) * (np.mean(group) - np.mean(pc[:, 0]))**2 for group in pc1_by_batch])
-    batch_eta = ss_between / ss_total if ss_total > 0 else 0
-  else:
-    batch_eta = (f_stat - len(batch_cat.categories) + 1) / (total_samples - len(batch_cat.categories) + 1)
-    batch_eta = max(0, min(1, batch_eta))
-  if verbose:
-    print(f"\nPC1 Analysis (confirmatory):")
-    print(f"  Batch effect on PC1: F={f_stat:.2f}, p={p_val:.3e} ({test_used})")
-    print(f"  Batch effect size (η²): {batch_eta:.1%}")
-  results = {
-    'pca_variance_explained': float(var_explained),
-    'batch_effect': {
-      'f_statistic': float(f_stat),
-      'p_value': float(p_val),
-      'test_used': test_used,
-      'effect_size_eta2': float(batch_eta)
+        print(f"\nPC1 Analysis (confirmatory):")
+        print(f"  Batch effect on PC1: F={f_stat:.2f}, p={p_val:.3e} ({test_used})")
+        print(f"  Batch effect size (η²): {batch_eta:.1%}")
+    results = {
+        'pca_variance_explained': float(var_explained),
+        'batch_effect': {
+            'f_statistic': float(f_stat),
+            'p_value': float(p_val),
+            'test_used': test_used,
+            'effect_size_eta2': float(batch_eta)
+        }
     }
-  }
-  if bio_labels is not None:
-    bio_effect = _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samples, verbose)
-    results['bio_effect'] = bio_effect
-    results['pvca'] = pvca_results
-    results['overall_quality'] = {
-      'severity': severity,
-      'severity_description': severity_description,
-      'decision_basis': 'PVCA variance decomposition'
-    }
-    batch_dummies = pd.get_dummies(batch_labels).values
-    var_batch = np.array([np.corrcoef(X[:, i], batch_dummies.T)[0, 1:].max()**2 for i in range(X.shape[1])])
-    median_var_batch = float(np.median(var_batch))
-    results['overall_quality']['median_variance_explained_by_batch'] = median_var_batch
-    if verbose:
-      print(f"  Median variance explained by batch across features: {median_var_batch:.1%}")
-    return results, pc, var_batch
-  else:
-    batch_dummies = pd.get_dummies(batch_labels).values
-    var_batch = np.array([np.corrcoef(X[:, i], batch_dummies.T)[0, 1:].max()**2 for i in range(X.shape[1])])
-    median_var_batch = float(np.median(var_batch))
-    results['median_variance_explained_by_batch'] = median_var_batch
-    if verbose:
-      print(f"Median variance explained by batch across features: {median_var_batch:.1%}")
-    return results, pc, var_batch
+    if bio_labels is not None:
+        bio_effect = _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samples, verbose)
+        results['bio_effect'] = bio_effect
+        results['pvca'] = pvca_results
+        results['overall_quality'] = {
+            'severity': severity,
+            'severity_description': severity_description,
+            'decision_basis': 'PVCA variance decomposition'
+        }
+        batch_dummies = pd.get_dummies(batch_labels).values
+        var_batch = np.array([np.corrcoef(X[:, i], batch_dummies.T)[0, 1:].max() ** 2 for i in range(X.shape[1])])
+        median_var_batch = float(np.median(var_batch))
+        results['overall_quality']['median_variance_explained_by_batch'] = median_var_batch
+        if verbose:
+            print(f"  Median variance explained by batch across features: {median_var_batch:.1%}")
+        return results, pc, var_batch
+    else:
+        batch_dummies = pd.get_dummies(batch_labels).values
+        var_batch = np.array([np.corrcoef(X[:, i], batch_dummies.T)[0, 1:].max() ** 2 for i in range(X.shape[1])])
+        median_var_batch = float(np.median(var_batch))
+        results['median_variance_explained_by_batch'] = median_var_batch
+        if verbose:
+            print(f"Median variance explained by batch across features: {median_var_batch:.1%}")
+        return results, pc, var_batch
 
 
-def check_bio_effect(data_clr, bio_labels, stage_name="", verbose=True):
+def check_bio_effect(data_clr, bio_labels, stage_name = "", verbose = True):
     pc, var_explained, total_samples, norm_p, _ = _compute_pca_and_stats(data_clr)
     # Choose test
     if total_samples < 30 or norm_p < 0.05:
@@ -573,7 +550,9 @@ def check_bio_effect(data_clr, bio_labels, stage_name="", verbose=True):
     }, pc
 
 
-def apply_missingness(Y_compositional, missing_fraction=0.0, mechanism="MNAR", mnar_bias=1.0, missing_params=None, group_labels=None, batch_labels=None, seed=42, verbose=True):
+def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR", mnar_bias = 1.0,
+                      missing_params = None, group_labels = None, batch_labels = None, seed = 42, impute = True,
+                      verbose = True):
     """Introduce missing values into compositional data under a chosen missingness mechanism.
     Parameters:
     -----------
@@ -607,13 +586,15 @@ def apply_missingness(Y_compositional, missing_fraction=0.0, mechanism="MNAR", m
         Per-sample labels (in column order) used by 'MAR' and 'mixed' and reported in the diagnostics
     seed : int
         Random seed for reproducibility
+    impute : bool
+        Impute the missing values with glycowork's impute_biosynthetic and return their CLR; False skips this and returns None
     verbose : bool
         Print diagnostics
     Returns:
     --------
     Y_missing : pd.DataFrame or np.ndarray
         Data with NaN for missing values (glycans x samples)
-    Y_missing_clr : pd.DataFrame or np.ndarray
+    Y_missing_clr : pd.DataFrame, np.ndarray or None
         CLR-transformed data (imputed before CLR)
     missing_mask : np.ndarray
         Boolean mask (True = missing), glycans x samples
@@ -627,15 +608,16 @@ def apply_missingness(Y_compositional, missing_fraction=0.0, mechanism="MNAR", m
             print("Missingness disabled (missing_fraction=0)")
         Y_clr = clr(Y_compositional.values.T if isinstance(Y_compositional, pd.DataFrame) else Y_compositional.T).T
         if isinstance(Y_compositional, pd.DataFrame):
-            Y_clr = pd.DataFrame(Y_clr, index=Y_compositional.index, columns=Y_compositional.columns)
-        return Y_compositional, Y_clr, np.zeros(Y_compositional.shape, dtype=bool), {}
-    params = {'mcar_share': 0.13, 'sample_sd': 0.8, 'dominance': 0.35, 'top_k': 3, 'group_sd': 0.2, 'batch_sd': 0.0, **(missing_params or {})}
+            Y_clr = pd.DataFrame(Y_clr, index = Y_compositional.index, columns = Y_compositional.columns)
+        return Y_compositional, Y_clr, np.zeros(Y_compositional.shape, dtype = bool), {}
+    params = {'mcar_share': 0.13, 'sample_sd': 0.8, 'dominance': 0.35, 'top_k': 3, 'group_sd': 0.2, 'batch_sd': 0.0,
+              **(missing_params or {})}
     rng = np.random.default_rng(seed)
     is_df = isinstance(Y_compositional, pd.DataFrame)
     # Internally samples x glycans
-    Y = np.asarray(Y_compositional.values if is_df else Y_compositional, dtype=float).T
+    Y = np.asarray(Y_compositional.values if is_df else Y_compositional, dtype = float).T
     n_samples, n_glycans = Y.shape
-    missing_mask = np.zeros_like(Y, dtype=bool)
+    missing_mask = np.zeros_like(Y, dtype = bool)
     f_mnar = missing_fraction * {"MNAR": 1.0, "mixed": 1.0 - params['mcar_share']}.get(mechanism, 0.0)
     f_rand = missing_fraction - f_mnar
     # Per-sample logit shifts s_i: in real glycomics data, per-sample missingness varies more than chance
@@ -645,14 +627,14 @@ def apply_missingness(Y_compositional, missing_fraction=0.0, mechanism="MNAR", m
     s = np.zeros(n_samples) if mechanism == "MNAR" else rng.normal(0.0, params['sample_sd'], n_samples)
     eligible = np.ones_like(missing_mask)
     if mechanism in ("MAR", "mixed"):
-        top = np.argsort(Y.mean(axis=0))[-int(params['top_k']):]
+        top = np.argsort(Y.mean(axis = 0))[-int(params['top_k']):]
         if mechanism == "MAR":
             eligible[:, top] = False
-        share = Y[:, top].sum(axis=1) / np.maximum(Y.sum(axis=1), 1e-10)
+        share = Y[:, top].sum(axis = 1) / np.maximum(Y.sum(axis = 1), 1e-10)
         s += params['dominance'] * (share - share.mean()) / (share.std() + 1e-10)
         for labels, sd in ((group_labels, params['group_sd']), (batch_labels, params['batch_sd'])):
             if labels is not None and sd > 0:
-                levels, codes = np.unique(np.asarray(labels), return_inverse=True)
+                levels, codes = np.unique(np.asarray(labels), return_inverse = True)
                 s += rng.normal(0.0, sd, len(levels))[codes]
     # MNAR missingness via logistic in log-abundance space.
     # For each sample i, the per-glycan missing probability is:
@@ -663,9 +645,11 @@ def apply_missingness(Y_compositional, missing_fraction=0.0, mechanism="MNAR", m
     if mechanism == "MNAR":
         for i in range(n_samples):
             log_x = np.log(np.maximum(Y[i, :], 1e-10))
+
             # Find a_i such that mean(1 / (1 + exp(a + b*log_x))) = missing_fraction.
             def mean_missing(a):
                 return np.mean(1.0 / (1.0 + np.exp(a + mnar_bias * log_x))) - missing_fraction
+
             # Bracket: large negative a → all missing (mean≈1), large positive → none missing (mean≈0)
             try:
                 a_i = brentq(mean_missing, -50, 50, xtol = 1e-6)
@@ -696,20 +680,20 @@ def apply_missingness(Y_compositional, missing_fraction=0.0, mechanism="MNAR", m
     # Apply missingness
     Y_missing = Y.copy()
     Y_missing[missing_mask] = np.nan
-    # Compute CLR with imputation
-    Y_for_clr = Y.copy()
-    Y_for_clr[missing_mask] = 1e-6
-    Y_missing_clr = clr(Y_for_clr)
+    # Impute before CLR: a 1e-6 floor turns every missing value into an extreme CLR outlier that dominates downstream PCA/PVCA
+    Y_missing_clr = clr(impute_biosynthetic(pd.DataFrame(Y_missing.T),
+                                            glycans = [str(g) for g in Y_compositional.index] if is_df else None,
+                                            random_state = seed).to_numpy().T) if impute else None
     # Diagnostics
     intensity_bins = [0, 0.01, 0.1, 1.0, np.inf]
     bin_labels = ['<0.01%', '0.01-0.1%', '0.1-1%', '>1%']
     missing_by_intensity = {}
-    for b_idx in range(len(intensity_bins)-1):
-        mask = (Y >= intensity_bins[b_idx]) & (Y < intensity_bins[b_idx+1])
+    for b_idx in range(len(intensity_bins) - 1):
+        mask = (Y >= intensity_bins[b_idx]) & (Y < intensity_bins[b_idx + 1])
         if np.sum(mask) > 0:
             missing_rate = np.sum(missing_mask & mask) / np.sum(mask)
             missing_by_intensity[bin_labels[b_idx]] = float(missing_rate)
-    per_sample_missing = np.sum(missing_mask, axis=1)
+    per_sample_missing = np.sum(missing_mask, axis = 1)
     diagnostics = {
         'mechanism': mechanism,
         'total_missing': int(np.sum(missing_mask)),
@@ -725,9 +709,9 @@ def apply_missingness(Y_compositional, missing_fraction=0.0, mechanism="MNAR", m
             labels = np.asarray(labels)
             diagnostics[key] = {str(g): float(missing_mask[labels == g].mean()) for g in np.unique(labels)}
     if verbose:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"{mechanism} MISSINGNESS APPLIED")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"Target fraction: {missing_fraction:.1%}")
         print(f"Actual fraction: {diagnostics['missing_fraction_actual']:.1%}")
         print(f"Total missing: {diagnostics['total_missing']}/{Y.size}")
@@ -736,10 +720,11 @@ def apply_missingness(Y_compositional, missing_fraction=0.0, mechanism="MNAR", m
         print(f"\nMissing rate by intensity:")
         for bin_label, rate in missing_by_intensity.items():
             print(f"  {bin_label:>12}: {rate:.1%}")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
     if is_df:
-        Y_missing = pd.DataFrame(Y_missing.T, index=Y_compositional.index, columns=Y_compositional.columns)
-        Y_missing_clr = pd.DataFrame(Y_missing_clr.T, index=Y_compositional.index, columns=Y_compositional.columns)
+        Y_missing = pd.DataFrame(Y_missing.T, index = Y_compositional.index, columns = Y_compositional.columns)
+        Y_missing_clr = pd.DataFrame(Y_missing_clr.T, index = Y_compositional.index,
+                                     columns = Y_compositional.columns) if impute else None
     else:
-        Y_missing, Y_missing_clr = Y_missing.T, Y_missing_clr.T
+        Y_missing, Y_missing_clr = Y_missing.T, (Y_missing_clr.T if impute else None)
     return Y_missing, Y_missing_clr, missing_mask.T, diagnostics

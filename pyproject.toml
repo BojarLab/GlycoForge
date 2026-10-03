@@ -31,7 +31,7 @@ dependencies = [
     "scikit-learn>=1.0.0",
     "matplotlib>=3.5.0",
     "seaborn>=0.11.0",
-    "glycowork>=1.10.0",
+    "glycowork>=1.10.2",
 ]
 
 [project.optional-dependencies]

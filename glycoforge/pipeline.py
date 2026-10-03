@@ -1,10 +1,10 @@
 from glycowork.glycan_data.loader import glycomics_data_loader
+from glycowork.glycan_data.data_entry import read_abundances
 from glycowork.motif.analysis import get_differential_expression
 from glycowork.motif.graph import subgraph_isomorphism
 import numpy as np
 import pandas as pd
 import os
-import re
 import json
 import warnings
 import contextlib
@@ -20,9 +20,8 @@ def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
   """Build pooled CLR reference matrix and LW covariance from glycowork datasets.
   Mirrors the synthetic-mode pooling logic in simulate() but as a reusable helper
   for simulate_paired, which needs separate refs for glycome A and B."""
-  _class_tag = {'N': '_n_', 'O': '_o_', 'GSL': '_gsl_'}.get(glycan_class)
-  _all_ds_names = [n for n in dir(glycomics_data_loader) if not n.startswith('_')
-                   and (_class_tag is None or _class_tag in n.lower())]
+  _class_tag = {'GSL': 'lipid'}.get(glycan_class, glycan_class)
+  _all_ds_names = dir(glycomics_data_loader) if _class_tag is None else glycomics_data_loader.filter(glycan_class = _class_tag)
   _pooled_clr, _pooled_R, _candidates = [], [], []
   for _n in _all_ds_names:
     _df = getattr(glycomics_data_loader, _n).copy()
@@ -278,10 +277,7 @@ def simulate(
             if _class_tag:
                 print(f"[Synthetic] Glycan class filter: {_class_tag}")
     elif data_source == "real":
-        try:
-            df = getattr(glycomics_data_loader, re.sub(r"\.csv$", "", str(data_file)).removeprefix("glycomics_"))
-        except:
-            df = pd.read_csv(data_file)
+        df = read_abundances(data_file)
         if glycan_sequences is None and 'glycan' in df.columns:
             glycan_sequences = df['glycan'].tolist()
         # Get column prefixes (with defaults)
@@ -431,6 +427,7 @@ def simulate(
             # We use Ledoit-Wolf shrinkage because n_samples << n_glycans is typical in glycomics,
             # making the raw sample covariance rank-deficient and numerically unusable.
             _clr_all_real = clr(_real_vals.T)  # (n_H + n_U, n_glycans)
+            _clr_H_real, _clr_U_real = _clr_all_real[:len(r7_cols)], _clr_all_real[len(r7_cols):]  # healthy columns come first; the "auto" pair-correlation target reads within-group r from these
             Sigma_mvn = LedoitWolf().fit(_clr_all_real).covariance_  # shrunk pooled covariance
             if verbose:
                 print(
@@ -727,10 +724,7 @@ def simulate(
         })
         # Add data processing information for transparency and debugging
         if data_source == "real":
-            # Get prefix info (handle both dict and None cases)
-            prefix_config = column_prefix if column_prefix is not None else {}
-            healthy_prefix_used = prefix_config.get('healthy', 'R7')
-            unhealthy_prefix_used = prefix_config.get('unhealthy', 'BM')
+            healthy_prefix_used, unhealthy_prefix_used = healthy_prefix, unhealthy_prefix  # re-reading column_prefix recorded R7/BM whenever glycowork contrasts set the groups
             # Add captured glycowork messages first (if any)
             if glycowork_messages:
                 metadata['glycowork_messages'] = glycowork_messages
@@ -891,16 +885,16 @@ def simulate_paired(
   and column names are shared. This is the correct data-generating process for studies
   that measure, for example, N- and O-glycomics from the same patient serum aliquots.
 
-  Each glycome is otherwise independently parameterised — different glycan counts,
+  Each glycome is otherwise independently parameterized — different glycan counts,
   different Dirichlet concentration parameters, different biological effect structures,
   and different batch direction vectors. The only shared quantities are the sample-level
   group memberships and batch assignments.
 
-  Cross-class coupling is controlled by *coupling_strength* (default 0). At zero the
+  Cross-class coupling is controlled by *coupling_strength* (default 0.5). At zero the
   two CLR matrices are conditionally independent given the sample labels. Increasing it
   injects shared latent factors in CLR space (see inject_coupling in sim_coupled.py),
   making HSIC between the two glycomes detectable. The coupling is added after clean
-  data generation and before batch effects, modelling biochemical co-regulation (e.g.
+  data generation and before batch effects, modeling biochemical co-regulation (e.g.
   shared sugar nucleotide pools) that would be present in vivo but attenuated by
   downstream sample handling variation.
 
@@ -943,7 +937,7 @@ def simulate_paired(
       structure; higher values spread the coupling across multiple axes.
   coupling_motif_A/B : dict or None
       {motif: any} — values ignored; keys used to bias the coupling direction
-      matrix toward glycans matching those motifs. Useful for modelling known
+      matrix toward glycans matching those motifs. Useful for modeling known
       biochemical links, e.g. shared fucosylation affecting both N- and O-glycans.
   coupling_motif_bias : float
       Weight multiplier for motif-matching glycans in the coupling direction matrix.
@@ -1305,8 +1299,7 @@ def simulate_circadian(data_file=None, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], 
         comp = comp / comp.sum(axis = 1, keepdims = True) * 100
         Y_clean = pd.DataFrame(comp.T, index = glycans, columns = cols)
         Y_clean.index.name = "glycan"
-        Y_clean_clr = pd.DataFrame((clr_clean - clr_clean.mean(axis = 1, keepdims = True)).T, index = glycans,
-                                   columns = cols)
+        Y_clean_clr = pd.DataFrame(clr(comp).T, index = glycans, columns = cols)  # clr_clean is log2 (glycowork's clr_transformation), but invclr in apply_batch_effect exponentiates with base e
         # ── Phase-stratified batches so batch is orthogonal to ZT ──────────
         batch_labels = np.empty(N, dtype=int)
         for phase in np.unique(cum):
@@ -1395,6 +1388,8 @@ def glycoforge_power(
     seqs = [seqs_all[i] for i in top]
     vals = mat.iloc[top].values.T
     vals = vals[~np.isnan(vals).any(axis = 1)]
+    _half_min = np.min(vals, axis=0, where=vals > 0, initial=np.inf) / 2  # zeros are missing values; clr's 1e-6 floor would make the copula reproduce them as quasi-zero abundances
+    vals = np.where(vals > 0, vals, np.nan_to_num(_half_min, posinf=1e-6))
     if vals.shape[0] < 3:
         raise ValueError(
             f"Reference has only {vals.shape[0]} complete samples across the top {n_glycans} glycans; need >= 3 for a stable Ledoit-Wolf covariance.")
@@ -1528,9 +1523,7 @@ def glycoforge_reliability(df, healthy_prefix, unhealthy_prefix, n_glycans=None,
     if not r_cols or not u_cols:
         raise ValueError(f"No columns matched prefixes healthy='{healthy_prefix}', unhealthy='{unhealthy_prefix}'.")
     seqs = [str(g) for g in df["glycan"].tolist()]
-    mat = df[r_cols + u_cols].apply(pd.to_numeric, errors="coerce").values.T
-    keep_rows = ~np.isnan(mat).any(axis=1)
-    mat = mat[keep_rows]
+    mat = df[r_cols + u_cols].apply(pd.to_numeric, errors="coerce").fillna(0).values.T  # NaN and 0 both encode missing values
     glycan_idx = np.arange(mat.shape[1])
     if n_glycans is not None and n_glycans < mat.shape[1]:
         top = np.argsort(mat.mean(axis = 0))[-n_glycans:]
@@ -1539,17 +1532,18 @@ def glycoforge_reliability(df, healthy_prefix, unhealthy_prefix, n_glycans=None,
         glycan_idx = glycan_idx[top]
     n_glycans = mat.shape[1]
     n_H, n_U = len(r_cols), len(u_cols)
-    clr_ref = clr(mat)
-    Sigma = LedoitWolf().fit(clr_ref).covariance_
     if missing_fraction is None:
-        missing_fraction = float(np.mean(df[r_cols + u_cols].apply(pd.to_numeric, errors="coerce").isna().values))
+        missing_fraction = float(np.mean(mat == 0))
+    _half_min = np.min(mat, axis=0, where=mat > 0, initial=np.inf) / 2  # zeros are missing values; clr's 1e-6 floor would make the copula reproduce them as quasi-zero abundances
+    clr_ref = clr(np.where(mat > 0, mat, np.nan_to_num(_half_min, posinf=1e-6)))
+    Sigma = LedoitWolf().fit(clr_ref).covariance_
     cols = [f"H{i}" for i in range(n_H)] + [f"U{i}" for i in range(n_U)]
     fp = np.empty(n_seeds, dtype=int)
     for s in range(n_seeds):
         P, _ = simulate_clean_data(np.ones(n_glycans), np.ones(n_glycans), n_H, n_U, seed=seed0 + s, real_clr_ref=clr_ref, Sigma_lw=Sigma, injection=np.zeros(n_glycans))
         Y = pd.DataFrame(P.T, index=seqs, columns=cols)
         if missing_fraction > 0:
-            Y, _, _, _ = apply_missingness(Y, missing_fraction=missing_fraction, seed=seed0 + s, verbose=False)
+            Y, _, _, _ = apply_missingness(Y, missing_fraction=missing_fraction, seed=seed0 + s, impute=False, verbose=False)
         d = Y.reset_index()
         d.columns = ["glycan"] + cols
         with contextlib.redirect_stdout(io.StringIO()):

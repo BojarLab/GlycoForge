@@ -1,62 +1,11 @@
 import re
-import os
 import numpy as np
 import pandas as pd
-from scipy import stats
 from sklearn.covariance import LedoitWolf
-from statsmodels.stats.multitest import multipletests
-from glycowork.glycan_data.stats import replace_outliers_winsorization, clr_transformation, impute_and_normalize
-from glycowork.glycan_data.loader import glycomics_data_loader
+from glycowork.glycan_data.stats import replace_outliers_winsorization, clr_transformation, impute_and_normalize, bh_adjust, cosinor_fit
+from glycowork.glycan_data.data_entry import read_abundances
 
 PERIOD = 24.0
-
-
-def build_design(t, period=PERIOD):
-    """Cosinor design matrix [1, cos(omega t), sin(omega t)] for times t (hours) at the given period."""
-    omega = 2 * np.pi / period
-    return np.column_stack([np.ones_like(t), np.cos(omega * t), np.sin(omega * t)])
-
-
-def cosinor_fit(y, t, period=PERIOD):
-    """Weighted single-harmonic cosinor fit of one feature over a circadian time course.
-    Collapses replicates to per-timepoint means, weights by inverse SEM^2, and fits
-    y_mean ~ mesor + a cos(omega t) + b sin(omega t) by weighted least squares.
-    Parameters
-    ----------
-    y : array-like, shape (n_samples,)
-        Feature values (CLR scale) across all samples.
-    t : array-like, shape (n_samples,)
-        Cumulative time in hours per sample; repeated values define replicate timepoints.
-    period : float
-        Rhythm period in hours (default 24).
-    Returns
-    -------
-    dict with keys: mesor, amplitude, acrophase_h, r_squared, f_stat, p_value, beta, y_hat.
-        amplitude = sqrt(a^2 + b^2); acrophase_h is the peak time in hours; the F-test
-        compares the full cosinor against the intercept-only model on the timepoint means.
-    """
-    unique_t = np.unique(t)
-    y_means = np.array([np.mean(y[t == u]) for u in unique_t])
-    y_sems = np.array([stats.sem(y[t == u]) for u in unique_t])
-    w = 1.0 / (y_sems**2 + 1e-10)
-    X = build_design(unique_t, period)
-    n, p = len(unique_t), X.shape[1]
-    W = np.diag(w)
-    beta = np.linalg.solve(X.T @ W @ X + np.eye(p) * 1e-12, X.T @ W @ y_means)
-    y_hat = X @ beta
-    wm = np.average(y_means, weights=w)
-    ss_res = np.sum(w * (y_means - y_hat)**2)
-    ss_tot = np.sum(w * (y_means - wm)**2)
-    df_res = n - p
-    r_squared = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
-    if df_res > 0 and ss_res > 0:
-        f_stat = ((ss_tot - ss_res) / (p - 1)) / (ss_res / df_res)
-        p_value = stats.f.sf(f_stat, p - 1, df_res)
-    else:
-        f_stat, p_value = 0.0, 1.0
-    amplitude = np.sqrt(beta[1]**2 + beta[2]**2)
-    acrophase_h = (np.arctan2(-beta[2], beta[1]) * period / (2 * np.pi)) % period
-    return {"mesor": beta[0], "amplitude": amplitude, "acrophase_h": acrophase_h, "r_squared": r_squared, "f_stat": f_stat, "p_value": p_value, "beta": beta, "y_hat": y_hat}
 
 
 def sample_columns(df):
@@ -83,10 +32,10 @@ def cosinor_table(mat, cum):
     Returns a per-feature table of amplitude, acrophase_h, F, p, acrophase_ZT, and two-stage
     adaptive BH q-values; zero-variance features are skipped. acrophase_ZT shifts acrophase_h
     by 12 h so that cumulative-hour 0 (the ZT12 start of the course) maps back onto the ZT clock."""
-    rows = [(name, (r := cosinor_fit(y, cum))["amplitude"], r["acrophase_h"], r["f_stat"], r["p_value"]) for name, y in zip(mat.index, mat.values) if np.std(y) > 0]
+    rows = [(name, (r := cosinor_fit(y, cum, period=PERIOD))["amplitude"], r["acrophase"], r["f_stat"], r["p_value"]) for name, y in zip(mat.index, mat.values) if np.std(y) > 0]
     out = pd.DataFrame(rows, columns=["feature", "amplitude", "acrophase_h", "F", "p"]).set_index("feature")
     out["acrophase_ZT"] = (out["acrophase_h"] + 12) % PERIOD
-    out["q"] = multipletests(out["p"], method="fdr_tsbh")[1]
+    out["q"] = bh_adjust(out["p"].to_numpy(), 0.05)
     return out
 
 
@@ -97,9 +46,7 @@ def prep_compositional(data_file, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], reps=
     parsed timepoints), and gamma=0 CLR. drop_cum optionally removes whole timepoints by their
     cumulative hour. Returns (clr_mat, cum, df): clr_mat is features x samples with duplicate
     glycans averaged, cum is the per-sample cumulative-hour vector, df the imputed wide table."""
-    stem = re.sub(r"\.csv$", "", str(data_file)).removeprefix("glycomics_")
-    df = pd.read_csv(data_file) if os.path.exists(str(data_file)) else pd.DataFrame(
-        getattr(glycomics_data_loader, stem))
+    df = pd.DataFrame(read_abundances(data_file))
     feat = df.columns[0]
     sc = sample_columns(df)
     df = df[[feat] + sc].copy()
