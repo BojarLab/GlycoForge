@@ -3,7 +3,9 @@ import json
 import pandas as pd
 import numpy as np
 from glycoforge import simulate, invclr, clr, plot_pca
-from .methods import combat, add_noise_to_zero_variance_features
+from sklearn.ensemble import RandomForestRegressor
+from glycowork.glycan_data.stats import impute_biosynthetic
+from .methods import combat, add_noise_to_zero_variance_features, impute_half_min, impute_median, impute_knn, impute_min, impute_minprob, impute_iterative
 from .evaluation import (
     quantify_batch_effect_impact,
     evaluate_biological_preservation,
@@ -104,17 +106,27 @@ def process_corrections(config):
             Y_with_batch_clr = pd.read_csv(f"{combo_dir}/2_Y_with_batch_clr_seed{seed}.csv", index_col=0)
             with open(f"{combo_dir}/metadata_seed{seed}.json", 'r') as f:
                 metadata = json.load(f)
+            batch_labels = np.array(metadata['sample_info']['batch_labels'])
+            bio_labels = np.array(metadata['sample_info']['bio_labels'])
+            bio_groups = metadata['sample_info']['bio_groups']
+            batch_groups = metadata['sample_info']['batch_groups']
             missing_file = f"{combo_dir}/3_Y_with_batch_and_missing_seed{seed}.csv"
             imputation_results = {}
             if os.path.exists(missing_file):
                 Y_missing = pd.read_csv(missing_file, index_col = 0)
                 missing_mask = Y_missing.isna().values
+                Y_missing = Y_missing / Y_missing.sum() * 100  # measured profiles are renormalized over the detected peaks; left unclosed, each sample's shortfall from 100% tells an imputer how much abundance is missing
                 if verbose:
                     n_missing = int(missing_mask.sum())
                     print(
                         f"    Found missing data: {n_missing} values ({n_missing / missing_mask.size:.1%}), benchmarking imputation methods")
                 for method_name, method_fn in [('half_min', impute_half_min), ('median', impute_median),
-                                               ('knn', impute_knn), ('min', impute_min)]:
+                                               ('knn', impute_knn), ('min', impute_min),
+                                               ('minprob', lambda d: impute_minprob(d, seed = seed)),
+                                               ('mice', lambda d: impute_iterative(d, seed = seed)),
+                                               ('missforest', lambda d: impute_iterative(d, RandomForestRegressor(n_jobs = -1, random_state = seed), seed = seed)),
+                                               ('biosynthetic', lambda d: impute_biosynthetic(d, glycans = d.index.astype(str).tolist(), random_state = seed)),
+                                               ('biosynthetic_no_glycans', lambda d: impute_biosynthetic(d, random_state = seed))]:
                     Y_imputed = method_fn(Y_missing)
                     imp_metrics = evaluate_imputation(Y_with_batch, Y_imputed, missing_mask)
                     Y_imputed_clr_values = clr(Y_imputed.values.T).T
@@ -133,10 +145,6 @@ def process_corrections(config):
                     if verbose:
                         print(
                             f"    [{method_name}] RMSE={imp_metrics['rmse']:.4f}, rel_RMSE={imp_metrics['relative_rmse']:.4f}, corr={imp_metrics['correlation']:.4f}, PVCA_batch={batch_after_imputation.get('pvca_batch_variance', float('nan')):.2f}%")
-            batch_labels = np.array(metadata['sample_info']['batch_labels'])
-            bio_labels = np.array(metadata['sample_info']['bio_labels'])
-            bio_groups = metadata['sample_info']['bio_groups']
-            batch_groups = metadata['sample_info']['batch_groups']
             batch_check_results = metadata.get('quality_checks', {}).get('Y_with_batch', {})
             
             batch_metrics_before = quantify_batch_effect_impact(

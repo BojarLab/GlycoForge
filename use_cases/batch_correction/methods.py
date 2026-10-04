@@ -277,11 +277,24 @@ def impute_median(data):
 
 def impute_knn(data, k=5):
   from sklearn.impute import KNNImputer
-  result = data.copy()
-  imputer = KNNImputer(n_neighbors=min(k, data.shape[1] - 1))
-  imputed = imputer.fit_transform(result.T.values)
-  result[:] = imputed.T
-  return result
+  # Neighbours are found in log space, where abundances spanning orders of magnitude are comparable; a glycan missing in every sample has no neighbours and gets half the global minimum
+  logged = np.log2(data.where(data > 0))
+  imputed = KNNImputer(n_neighbors=min(k, data.shape[1] - 1), keep_empty_features=True).fit_transform(logged.T.values).T
+  return pd.DataFrame(np.where(logged.notna().any(axis=1).values[:, None], np.exp2(imputed), np.exp2(np.nanmin(logged.values)) / 2), index=data.index, columns=data.columns)
+
+def impute_minprob(data, q=0.01, tune_sigma=1, seed=0):
+  # Left-censored draws per sample from N(q-quantile of its log values, median glycan SD * tune_sigma), as MinProb in imputeLCMD/DEP
+  logged = np.log2(data.where(data > 0))
+  draws = np.random.default_rng(seed).normal(np.nanquantile(logged.values, q, axis=0), np.nanmedian(logged.std(axis=1)) * tune_sigma, logged.shape)
+  return pd.DataFrame(np.where(logged.isna(), np.exp2(draws), data), index=data.index, columns=data.columns)
+
+def impute_iterative(data, estimator=None, seed=0):
+  from sklearn.experimental import enable_iterative_imputer
+  from sklearn.impute import IterativeImputer
+  # Each glycan regressed on all others across samples, in log space: BayesianRidge (default) is MICE, a random forest is missForest; empty glycans as in impute_knn
+  logged = np.log2(data.where(data > 0))
+  imputed = IterativeImputer(estimator=estimator, max_iter=10, initial_strategy='median', keep_empty_features=True, random_state=seed).fit_transform(logged.T.values).T
+  return pd.DataFrame(np.where(logged.notna().any(axis=1).values[:, None], np.exp2(imputed), np.exp2(np.nanmin(logged.values)) / 2), index=data.index, columns=data.columns)
 
 def impute_min(data, eps=1e-6):
   return data.fillna(eps)

@@ -10,7 +10,8 @@ from scipy.spatial.distance import squareform, pdist
 from sklearn.cluster import KMeans
 from glycowork.motif.analysis import get_differential_expression
 from glycoforge.sim_bio_factor import create_bio_groups
-from glycoforge.utils import pvca_variance_decomposition
+from glycoforge.utils import clr
+from glycowork.glycan_data.stats import pvca
 import contextlib
 import io
 import warnings
@@ -518,7 +519,7 @@ def quantify_batch_effect_impact(Y_with_batch_clr, #DataFrame (glycans x samples
 
     # PVCA as primary comprehensive metric
     if bio_labels is not None:
-      pvca_results = pvca_variance_decomposition(Y_with_batch_clr, batch_labels, bio_labels, n_components=10)
+      pvca_results = {f"{k}_variance_pct": v for k, v in pvca(Y_with_batch_clr, {'batch': batch_labels, 'bio': bio_labels}, n_components=10).items()}
       metrics['pvca_batch_variance'] = pvca_results['batch_variance_pct']
       metrics['pvca_bio_variance'] = pvca_results['bio_variance_pct']
       metrics['pvca_residual_variance'] = pvca_results['residual_variance_pct']
@@ -852,11 +853,11 @@ def generate_comprehensive_metrics(seed, output_dir,
     return correction_data
 
 def evaluate_imputation(Y_true, Y_imputed, missing_mask):
-  true_vals = Y_true.values[missing_mask]
-  imputed_vals = Y_imputed.values[missing_mask]
+  # Scored in CLR space, where the per-sample rescaling of closure cancels; normalizing by the spread of all true CLR values keeps it comparable across mechanisms that mask different abundance ranges
+  true_clr, imputed_clr = clr(Y_true.values.T).T, clr(Y_imputed.values.T).T
+  true_vals, imputed_vals = true_clr[missing_mask], imputed_clr[missing_mask]
   if len(true_vals) == 0:
-    return {'rmse': 0.0, 'relative_rmse': 0.0, 'correlation': 0.0, 'n_missing': 0}
+    return {'rmse': 0.0, 'relative_rmse': 0.0, 'bias': 0.0, 'correlation': 0.0, 'n_missing': 0}
   rmse = float(np.sqrt(np.mean((true_vals - imputed_vals) ** 2)))
-  rel_rmse = rmse / max(float(np.mean(np.abs(true_vals))), 1e-10)
   corr = float(np.corrcoef(true_vals, imputed_vals)[0, 1]) if np.std(true_vals) > 1e-10 and np.std(imputed_vals) > 1e-10 else 0.0
-  return {'rmse': rmse, 'relative_rmse': rel_rmse, 'correlation': 0.0 if np.isnan(corr) else corr, 'n_missing': int(np.sum(missing_mask))}
+  return {'rmse': rmse, 'relative_rmse': rmse / max(float(np.std(true_clr)), 1e-10), 'bias': float(np.mean(imputed_vals - true_vals)), 'correlation': 0.0 if np.isnan(corr) else corr, 'n_missing': int(np.sum(missing_mask))}

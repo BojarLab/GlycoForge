@@ -40,27 +40,27 @@ def cosinor_table(mat, cum):
 
 
 def prep_compositional(data_file, zt_seq=[12, 18, 0, 6, 12, 18, 0, 6, 12], reps=None, cum_seq=None, drop_cum=None):
-    """Load a circadian glycan x sample dataset and return its circadian-imputed CLR matrix.
+    """Load a circadian glycan x sample dataset and return its imputed CLR matrix.
     data_file is a path to a glycan x sample CSV or a glycowork dataset name. Applies row-wise
-    Winsorization, circadian-aware imputation (impute_and_normalize with circadian=True at the
-    parsed timepoints), and gamma=0 CLR. drop_cum optionally removes whole timepoints by their
-    cumulative hour. Returns (clr_mat, cum, df): clr_mat is features x samples with duplicate
-    glycans averaged, cum is the per-sample cumulative-hour vector, df the imputed wide table."""
+    Winsorization, rhythm-test imputation (impute_and_normalize with circadian=True, which adds a
+    draw of the prediction error to every imputed value), and gamma=0 CLR. drop_cum optionally
+    removes whole timepoints by their cumulative hour. Returns (clr_mat, cum, df): clr_mat is
+    features x samples with duplicate glycans averaged, cum is the per-sample cumulative-hour vector, df the imputed wide table."""
     df = pd.DataFrame(read_abundances(data_file))
     feat = df.columns[0]
     sc = sample_columns(df)
     df = df[[feat] + sc].copy()
     df[feat] = df[feat].astype(str)
     df[sc] = df[sc].apply(pd.to_numeric, errors="coerce").fillna(0)
-    cum, zt = parse_time(sc, zt_seq=zt_seq, reps=reps, cum_seq=cum_seq)
+    cum, _ = parse_time(sc, zt_seq=zt_seq, reps=reps, cum_seq=cum_seq)
     if drop_cum is not None:
         keep = ~np.isin(cum, drop_cum)
         sc = [c for c, k in zip(sc, keep) if k]
-        cum, zt = cum[keep], zt[keep]
+        cum = cum[keep]
         df = df[[feat] + sc]
     df = df.loc[~(df[sc] == 0).all(axis=1)].reset_index(drop=True)
     df = replace_outliers_winsorization(df)
-    df = impute_and_normalize(df, [df.columns[1:].tolist()], impute=True, min_samples=0.25, circadian=True, timepoints=zt, periods=[24])
+    df = impute_and_normalize(df, [df.columns[1:].tolist()], impute=True, min_samples=0.25, circadian=True)
     data = df.iloc[:, 1:].astype(float)
     data.index = df.iloc[:, 0].values
     clr_mat = clr_transformation(data, data.columns.tolist(), [], gamma=0).groupby(level=0).mean()
