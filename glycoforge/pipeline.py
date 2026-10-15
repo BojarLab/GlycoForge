@@ -58,7 +58,7 @@ def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
     np.fill_diagonal(_R_i, 1.0)
     _pooled_clr.append(_clr_i)
     _pooled_R.append(_R_i)
-    _candidates.append((_n, _seqs, _sub))
+    _candidates.append((_n, [_seqs[_i] for _i in _keep], _sub)) # Sequences aligned with the deduplicated rows of _sub
   if not _pooled_R:
       raise ValueError(
           f"No glycowork datasets found with >= {n_glycans} glycans for class '{glycan_class}'. Try a lower n_glycans or glycan_class=None.")
