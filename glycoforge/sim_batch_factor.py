@@ -93,9 +93,10 @@ def define_batch_direction(
     return u_dict, batch_effect_direction
 
 
-def stratified_batches_from_columns(columns, n_batches=3, seed=None, verbose=True, control_prefix="healthy_"):
+def stratified_batches_from_columns(columns, n_batches=3, seed=None, verbose=True, control_prefix="healthy_", labels=None):
+    # labels (bio group per column) stratify any number of groups; without them, columns split into control_prefix vs. the rest
     rng = np.random.default_rng(seed)
-    labels = np.array([0 if str(c).startswith(control_prefix) else 1 for c in columns])
+    labels = np.array([0 if str(c).startswith(control_prefix) else 1 for c in columns]) if labels is None else np.asarray(labels)
     batch_labels = np.zeros(len(labels), dtype=int)
     for g in np.unique(labels):
         idx = np.where(labels == g)[0]

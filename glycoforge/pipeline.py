@@ -11,7 +11,7 @@ import contextlib
 import io
 import matplotlib.pyplot as plt
 from sklearn.covariance import LedoitWolf
-from glycoforge.sim_bio_factor import create_bio_groups, simulate_clean_data, generate_alpha_U, define_bio_injection_from_real_data, define_differential_mask, calibrate_pair_corr
+from glycoforge.sim_bio_factor import simulate_clean_data, generate_alpha_U, define_bio_injection_from_real_data, define_differential_mask, calibrate_pair_corr
 from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
 from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, apply_missingness, find_compositional_pairs
 
@@ -79,7 +79,8 @@ def simulate(
     glycan_class="N", # only used when data_source = "simulated"
     n_glycans=50,
     n_H=15,
-    n_U=15,
+    n_U=15,  # an int simulates healthy vs. unhealthy; a list of sizes (e.g., [10, 10, 10]) simulates one case group per entry next to healthy
+    group_effect_scale=None,  # with n_U a list: per-case-group multipliers of bio_strength (0 = null group, same mean as healthy); default all 1
     bio_strength=1.5,
     k_dir=100,
     variance_ratio=1.5,
@@ -179,6 +180,7 @@ def simulate(
                 'n_glycans': n_glycans,
                 'n_H': n_H,
                 'n_U': n_U,
+                'group_effect_scale': group_effect_scale,
                 'bio_strength': bio_strength,
                 'k_dir': k_dir,
                 'variance_ratio': variance_ratio,
@@ -224,6 +226,12 @@ def simulate(
         raise ValueError(f"data_source must be 'simulated' or 'real', got '{data_source}'")
     if data_source == "real" and data_file is None:
         raise ValueError("data_file is required when data_source='real'")
+    _n_case = list(np.atleast_1d(n_U))  # one entry per case group; group 0 (healthy) is the reference every case group is shifted from
+    _effect_scale = np.ones(len(_n_case)) if group_effect_scale is None else np.atleast_1d(np.asarray(group_effect_scale, dtype=float))
+    if len(_effect_scale) != len(_n_case):
+        raise ValueError(f"group_effect_scale needs one entry per case group ({len(_n_case)}), got {len(_effect_scale)}")
+    _group_names = ['healthy'] + (['unhealthy'] if len(_n_case) == 1 else [f'unhealthy{g + 1}' for g in range(len(_n_case))])
+    _unwrap = (lambda x: x[0]) if len(_n_case) == 1 else (lambda x: x)  # two-group runs keep their metadata layout; more groups store per-group lists
     if show_pca_plots is None:
         show_pca_plots = verbose
     os.makedirs(output_dir, exist_ok=True)
@@ -263,13 +271,13 @@ def simulate(
             glycan_sequences = [_rep_seqs[i] for i in _top_pos]
         real_effect_sizes = None
         if motif_rules is not None and glycan_sequences is not None:
-            _alpha_U_motif, _ = generate_alpha_U(
+            # One draw per case group (seed 42 for the first, as with two groups), so case groups regulate different glycans
+            alpha_U_base = [generate_alpha_U(
                 alpha_H, up_frac = 0.3, down_frac = 0.35,
                 glycan_sequences = glycan_sequences[:n_glycans],
                 motif_rules = motif_rules, motif_bias = motif_bias,
-                seed = 42, verbose = verbose
-            )
-            alpha_U_base = _alpha_U_motif
+                seed = 42 + _g, verbose = verbose
+            )[0] for _g in range(len(_n_case))]
         else:
             alpha_U_base = None
         if verbose:
@@ -283,24 +291,28 @@ def simulate(
         # Get column prefixes (with defaults)
         if column_prefix is None and getattr(df, '_contrasts', None):
             # glycowork ships per-dataset contrasts, so built-in datasets already know
-            # their own control/case split; group1 is the control group by file convention.
-            r7_cols, bm_cols = list(df.group1), list(df.group2)
-            healthy_prefix, unhealthy_prefix = df.group1.name, df.group2.name
+            # their own control/case split; group1 is the control group by file convention,
+            # and the next contrast groups fill the case groups in order.
+            _contrast_names = list(dict.fromkeys(df._contrasts.values()))
+            healthy_prefix, unhealthy_prefix = _contrast_names[0], _contrast_names[1:len(_n_case) + 1]
+            r7_cols = [c for c in df.columns if df._contrasts.get(c) == healthy_prefix]
+            bm_cols = [[c for c in df.columns if df._contrasts.get(c) == _name] for _name in unhealthy_prefix]
         else:
             column_prefix = column_prefix or {}
             healthy_prefix = column_prefix.get('healthy', 'R7')
-            unhealthy_prefix = column_prefix.get('unhealthy', 'BM')
+            unhealthy_prefix = column_prefix.get('unhealthy', 'BM')  # a list of prefixes, one per case group, when n_U is a list
+            unhealthy_prefix = [unhealthy_prefix] if isinstance(unhealthy_prefix, str) else list(unhealthy_prefix)
             r7_cols = [c for c in df.columns if c.startswith(healthy_prefix)]
-            bm_cols = [c for c in df.columns if c.startswith(unhealthy_prefix)]
-        if not r7_cols or not bm_cols:
+            bm_cols = [[c for c in df.columns if c.startswith(_prefix)] for _prefix in unhealthy_prefix]
+        if not r7_cols or len(bm_cols) != len(_n_case) or not all(bm_cols):
             raise ValueError(
-                f"No columns found for healthy='{healthy_prefix}', unhealthy='{unhealthy_prefix}'. "
+                f"Need columns for healthy='{healthy_prefix}' and one non-empty case group per n_U entry ({len(_n_case)}), got unhealthy={unhealthy_prefix}. "
                 f"Available columns: {df.columns.tolist()[:10]}... "
                 f"Pass 'column_prefix', or use a glycowork dataset that carries contrasts."
             )
         # Get actual number of glycans from real data
         n_glycans_real = df.shape[0]
-        numeric_cols = r7_cols + bm_cols
+        numeric_cols = r7_cols + [c for _cols in bm_cols for c in _cols]
         df = df.copy()
         df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce").fillna(0)  # NaN and 0 both encode missing values
         df_processed = df.copy()
@@ -311,8 +323,8 @@ def simulate(
         _real_vals = np.where(_real_vals > 0, _real_vals, np.nan_to_num(_half_min, posinf=1e-6))
         if verbose:
             print(f"[Real Data] Calling get_differential_expression with:")
-            print(f"  - group1 (disease/unhealthy): {len(bm_cols)} samples (expected: {unhealthy_prefix})")
-            print(f"    → {bm_cols[:min(3, len(bm_cols))]}...")
+            print(f"  - group1 (disease/unhealthy), one call per case group: {[len(_cols) for _cols in bm_cols]} samples (expected: {unhealthy_prefix})")
+            print(f"    → {[_cols[:min(3, len(_cols))] for _cols in bm_cols]}...")
             print(f"  - group2 (control/healthy): {len(r7_cols)} samples (expected: {healthy_prefix})")
             print(f"    → {r7_cols[:min(3, len(r7_cols))]}...")
             print(f"  - transform='CLR', impute=True")
@@ -321,47 +333,42 @@ def simulate(
         # This ensures positive effect sizes indicate upregulation in disease
         # Suppress glycowork output when verbose=False and capture messages
         glycowork_messages = []
-        if not verbose:
-            stdout_capture = io.StringIO()
-            with contextlib.redirect_stdout(stdout_capture), \
-                 warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
+        real_effect_sizes, significant_mask = [], []  # one entry per case group, each tested against healthy
+        for _cols in bm_cols:
+            if not verbose:
+                stdout_capture = io.StringIO()
+                with contextlib.redirect_stdout(stdout_capture), \
+                     warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    results = get_differential_expression(
+                        df_processed,
+                        group1 = _cols,
+                        group2 = r7_cols,
+                        transform = "CLR",
+                        impute = True,
+                        paired = False,
+                        random_state = 42
+                    )
+                captured_stdout = stdout_capture.getvalue().strip()
+                if captured_stdout:
+                    glycowork_messages.append(f"get_differential_expression: {captured_stdout}")
+                if w:
+                    for warning in w:
+                        glycowork_messages.append(f"{warning.category.__name__}: {warning.message}")
+            else:
                 results = get_differential_expression(
                     df_processed,
-                    group1 = bm_cols,
+                    group1 = _cols,
                     group2 = r7_cols,
                     transform = "CLR",
                     impute = True,
                     paired = False,
                     random_state = 42
                 )
-            captured_stdout = stdout_capture.getvalue().strip()
-            if captured_stdout:
-                glycowork_messages.append(f"get_differential_expression: {captured_stdout}")
-            if w:
-                for warning in w:
-                    glycowork_messages.append(f"{warning.category.__name__}: {warning.message}")
-        else:
-            results = get_differential_expression(
-                df_processed,
-                group1 = bm_cols,
-                group2 = r7_cols,
-                transform = "CLR",
-                impute = True,
-                paired = False,
-                random_state = 42
-            )
-
-        # Handle cases where glycowork filters out some glycans or returns NaN
-        # Create aligned effect size array matching original glycan order
-        if len(results) != n_glycans_real:
-            if verbose:
-                print(
-                    f"[Real Data] Warning: get_differential_expression returned {len(results)} rows, expected {n_glycans_real}")
-                print(
-                    f"[Real Data] Aligning effect sizes by Glycan string against original order, filling missing with 0.0")
-            # glycowork drops and reorders glycans, so match on the 'Glycan' string column
-            # against the original df glycan order, never on integer index.
+            # glycowork drops glycans and sorts its results by p-value, so effect sizes are matched on the 'Glycan' string
+            # against the original df glycan order, never by position; glycans it dropped get 0.0
+            if verbose and len(results) != n_glycans_real:
+                print(f"[Real Data] Warning: get_differential_expression returned {len(results)} rows, expected {n_glycans_real}; filling missing with 0.0")
             original_glycans = [str(g) for g in df_processed['glycan'].tolist()]
             effect_by_glycan = dict(zip(results['Glycan'].astype(str), results['Effect size']))
             sig_series = results['significant'] if 'significant' in results.columns else pd.Series(
@@ -374,12 +381,8 @@ def simulate(
                 aligned_effect_sizes[pos] = es if not pd.isna(es) else 0.0
                 sg = sig_by_glycan.get(g, False)
                 aligned_significant[pos] = bool(sg) if not pd.isna(sg) else False
-            real_effect_sizes = aligned_effect_sizes.tolist()
-            significant_mask = aligned_significant
-        else:
-            # Normal case: lengths match, just handle NaN
-            real_effect_sizes = results['Effect size'].fillna(0.0).tolist()
-            significant_mask = results['significant'].values if 'significant' in results.columns else None
+            real_effect_sizes.append(aligned_effect_sizes.tolist())
+            significant_mask.append(aligned_significant)
         if use_real_effect_sizes:
             # Extract healthy baseline from mean of all healthy samples
             healthy_ref = df[r7_cols].mean(axis=1).values
@@ -390,24 +393,24 @@ def simulate(
                     print(f"[Real Data] Found {(healthy_ref == 0).sum()} zeros in healthy mean")
             # Normalize to proportions
             p_h = healthy_ref / np.sum(healthy_ref)
-            # Resolve differential_mask using helper
+            # Resolve differential_mask using helper, once per case group
             # Use aligned significant_mask that matches n_glycans_real
-            differential_mask = define_differential_mask(
+            differential_mask = [define_differential_mask(
                 differential_mask,
                 n_glycans=len(p_h),
-                effect_sizes=real_effect_sizes,
-                significant_mask=significant_mask,  # Already aligned above
+                effect_sizes=_es,
+                significant_mask=_sig,  # Already aligned above
                 verbose=verbose
-            )
+            ) for _es, _sig in zip(real_effect_sizes, significant_mask)]
             if verbose:
-                n_differential = int(differential_mask.sum())
-                print(f"[Real Data] {n_differential}/{len(differential_mask)} glycans will have effects injected")
-            # Call new function with real effect sizes via CLR-space injection
-            alpha_H, alpha_U_base, bio_debug_info = define_bio_injection_from_real_data(
+                n_differential = [int(_m.sum()) for _m in differential_mask]
+                print(f"[Real Data] {n_differential}/{len(p_h)} glycans will have effects injected")
+            # Call new function with real effect sizes via CLR-space injection; each case group gets its own injection vs. healthy
+            _bio_injections = [define_bio_injection_from_real_data(
                 p_h=p_h,
-                effect_sizes=real_effect_sizes,
-                differential_mask=differential_mask,
-                bio_strength=bio_strength,
+                effect_sizes=_es,
+                differential_mask=_mask,
+                bio_strength=bio_strength * _scale,
                 k_dir=k_dir,
                 variance_ratio=variance_ratio,
                 winsorize_percentile=winsorize_percentile,
@@ -415,19 +418,22 @@ def simulate(
                 min_alpha=0.5,
                 max_alpha=None,
                 verbose=verbose
-            )
+            ) for _es, _mask, _scale in zip(real_effect_sizes, differential_mask, _effect_scale)]
+            alpha_H = _bio_injections[0][0]
+            alpha_U_base = [_b[1] for _b in _bio_injections]
+            bio_debug_info = [_b[2] for _b in _bio_injections]
             # Override n_glycans with actual data size
             n_glycans = n_glycans_real
             if verbose:
                 print(f"[Real Data] Used CLR-space injection for effect sizes")
                 print(f"[Real Data] Actual n_glycans from data: {n_glycans}")
                 print(f"[Real Data] alpha_H: [{alpha_H.min():.3f}, {alpha_H.max():.3f}]")
-                print(f"[Real Data] alpha_U: [{alpha_U_base.min():.3f}, {alpha_U_base.max():.3f}]")
+                print(f"[Real Data] alpha_U: [{np.min(alpha_U_base):.3f}, {np.max(alpha_U_base):.3f}]")
             # Compute MVN sampler parameters once (reused across all seeds).
             # We use Ledoit-Wolf shrinkage because n_samples << n_glycans is typical in glycomics,
             # making the raw sample covariance rank-deficient and numerically unusable.
-            _clr_all_real = clr(_real_vals.T)  # (n_H + n_U, n_glycans)
-            _clr_H_real, _clr_U_real = _clr_all_real[:len(r7_cols)], _clr_all_real[len(r7_cols):]  # healthy columns come first; the "auto" pair-correlation target reads within-group r from these
+            _clr_all_real = clr(_real_vals.T)  # (n_samples, n_glycans)
+            _clr_groups_real = np.split(_clr_all_real, np.cumsum([len(r7_cols)] + [len(_cols) for _cols in bm_cols])[:-1])  # columns run healthy, then each case group; the "auto" pair-correlation target reads within-group r from these
             Sigma_mvn = LedoitWolf().fit(_clr_all_real).covariance_  # shrunk pooled covariance
             if verbose:
                 print(
@@ -448,18 +454,18 @@ def simulate(
         # Quick check: Original real data bio effect (only in hybrid mode)
         original_data_bio_check = None
         if use_real_effect_sizes:
-            bio_labels_real = [0] * len(r7_cols) + [1] * len(bm_cols)
-            real_data_values = df[r7_cols + bm_cols].values.T
+            bio_labels_real = np.repeat(np.arange(len(bm_cols) + 1), [len(r7_cols)] + [len(_cols) for _cols in bm_cols])
+            real_data_values = df[numeric_cols].values.T
             real_data_clr = clr(real_data_values).T
-            real_data_clr_df = pd.DataFrame(real_data_clr, columns=r7_cols + bm_cols)
+            real_data_clr_df = pd.DataFrame(real_data_clr, columns=numeric_cols)
             original_data_bio_check, _ = check_bio_effect(
                 real_data_clr_df, bio_labels_real,
                 stage_name="Original Real Data", verbose=verbose
             )
         if verbose:
-            print(f"Loaded real data: {len(r7_cols)} healthy, {len(bm_cols)} unhealthy")
+            print(f"Loaded real data: {len(r7_cols)} healthy, {[len(_cols) for _cols in bm_cols]} unhealthy")
             print(f"Number of glycans: {n_glycans}")
-            print(f"Effect sizes range: [{min(real_effect_sizes):.3f}, {max(real_effect_sizes):.3f}]")
+            print(f"Effect sizes range: [{np.min(real_effect_sizes):.3f}, {np.max(real_effect_sizes):.3f}]")
     # Step 2: Define batch direction vectors
     # Default: use the provided batch_effect_direction as raw value
     batch_effect_direction_raw = batch_effect_direction
@@ -493,9 +499,7 @@ def simulate(
         if _sp and use_real_effect_sizes:
             _pc_raw = []
             for _si, _pi in _sp:
-                _rv = [v for v in [
-                    np.corrcoef(_clr_H_real[:, _si], _clr_H_real[:, _pi])[0, 1] if _clr_H_real.shape[0] > 2 else np.nan,
-                    np.corrcoef(_clr_U_real[:, _si], _clr_U_real[:, _pi])[0, 1] if _clr_U_real.shape[0] > 2 else np.nan]
+                _rv = [v for v in [np.corrcoef(_c[:, _si], _c[:, _pi])[0, 1] if _c.shape[0] > 2 else np.nan for _c in _clr_groups_real]
                        if not np.isnan(v)]
                 if pair_corr_target == "auto" and _rv:
                     _pc_raw.append(
@@ -524,25 +528,25 @@ def simulate(
         else:
             if alpha_U_base is not None:
                 alpha_U = alpha_U_base
-                _p_H_syn = alpha_H / alpha_H.sum()
-                _p_U_syn = alpha_U / alpha_U.sum()
-                _injection_dir_syn = clr(_p_U_syn) - clr(_p_H_syn)
+                _injection_dir_syn = [(clr(_a / _a.sum()) - clr(alpha_H / alpha_H.sum())) * _scale for _a, _scale in zip(alpha_U, _effect_scale)]
             else:
+                # The first case group shifts along the top-_K_bio covariance eigenvectors with random signs (as with two
+                # groups); later ones along random rotations of that subspace, so case groups differ from each other too
                 _rng_bio = np.random.default_rng(seed + 999)
-                _signs_syn = np.sign(_rng_bio.standard_normal(_K_bio))
-                _injection_dir_syn = (_top_evecs_syn * _signs_syn).T
-                alpha_U = alpha_H.copy()
+                _injection_dir_syn = [(_top_evecs_syn * np.sign(_rng_bio.standard_normal(_K_bio))).T]
+                _injection_dir_syn += [(_top_evecs_syn @ np.linalg.qr(_rng_bio.standard_normal((_K_bio, _K_bio)))[0]).T for _ in _n_case[1:]]
+                alpha_U = [alpha_H.copy() for _ in _n_case]
         # Step 3: Generate clean data
         if use_real_effect_sizes:
-            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
+            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, _n_case, seed = seed, verbose = verbose,
                                             real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn,
-                                            injection = np.array(bio_debug_info['injection']),
+                                            injection = [np.array(_d['injection']) for _d in bio_debug_info],
                                             pair_corr = pair_corr_cal)
         else:
             _use_scale = (alpha_U_base is None)
-            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, n_U, seed = seed, verbose = verbose,
+            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, _n_case, seed = seed, verbose = verbose,
                                             real_clr_ref = _clr_all_syn, Sigma_lw = _Sigma_syn,
-                                            injection = _injection_dir_syn, bio_strength = bio_strength,
+                                            injection = _injection_dir_syn, bio_strength = bio_strength * _effect_scale,
                                             scale_injection = _use_scale, pair_corr = pair_corr_cal)
         if glycan_sequences is not None:
             glycan_index = glycan_sequences[:n_glycans]
@@ -553,8 +557,7 @@ def simulate(
         Y_clean = pd.DataFrame(
             P.T,
             index=glycan_index,
-            columns=[f"healthy_{i + 1}" for i in range(np.sum(labels == 0))] +
-                    [f"unhealthy_{i + 1}" for i in range(np.sum(labels == 1))]
+            columns=[f"{_name}_{i + 1}" for g, _name in enumerate(_group_names) for i in range(np.sum(labels == g))]
         )
         Y_clean.index.name = index_name
         Y_clean_clr = clr(Y_clean.values.T).T
@@ -563,9 +566,8 @@ def simulate(
             Y_clean.to_csv(f"{output_dir}/1_Y_clean_seed{seed}.csv", float_format="%.32f")
             Y_clean_clr.to_csv(f"{output_dir}/1_Y_clean_clr_seed{seed}.csv", float_format="%.32f")
         # Quick check: Simulated clean data bio effect (all modes)
-        bio_labels_sim = [0] * n_H + [1] * n_U
         Y_clean_bio_check, _ = check_bio_effect(
-            Y_clean_clr, bio_labels_sim,
+            Y_clean_clr, labels,
             stage_name="Simulated Clean Data (Y_clean)", verbose=verbose
         )
         # Show injection success summary (only in hybrid mode with verbose)
@@ -574,8 +576,8 @@ def simulate(
             print("  BIO INJECTION SUCCESS CHECK")
             print("=" * 60)
             if bio_debug_info is not None:
-                injection = np.array(bio_debug_info['injection'])
-                n_injected = np.sum(injection != 0)
+                injection = np.array([_d['injection'] for _d in bio_debug_info])
+                n_injected = np.sum(np.any(injection != 0, axis=0))
                 print(f"  Injected {n_injected}/{n_glycans} glycans")
                 print(f"  Injection range: [{injection.min():.2f}, {injection.max():.2f}] CLR units")
                 if original_data_bio_check is not None:
@@ -589,7 +591,8 @@ def simulate(
             Y_clean_clr.columns,
             n_batches=n_batches,
             seed=seed,
-            verbose=verbose
+            verbose=verbose,
+            labels=labels
         )
         Y_clean_T = Y_clean_clr.T.values
         sigma = estimate_sigma(Y_clean_clr)
@@ -610,10 +613,8 @@ def simulate(
         if save_csv:
             Y_with_batch.to_csv(f"{output_dir}/2_Y_with_batch_seed{seed}.csv", float_format="%.32f")
             Y_with_batch_clr.to_csv(f"{output_dir}/2_Y_with_batch_clr_seed{seed}.csv", float_format="%.32f")
-        bio_groups, bio_labels = create_bio_groups(
-            Y_clean_clr,
-            {'Healthy': ['healthy'], 'Unhealthy': ['unhealthy']}
-        )
+        bio_labels = labels
+        bio_groups = {_name.capitalize(): list(Y_clean_clr.columns[labels == g]) for g, _name in enumerate(_group_names)}
         # Step 4.5: Apply missingness
         Y_missing, Y_missing_clr, missing_mask, missing_diagnostics = apply_missingness(
             Y_with_batch,
@@ -655,6 +656,7 @@ def simulate(
         bio_parameters = {
             'n_H': n_H,
             'n_U': n_U,
+            'group_effect_scale': group_effect_scale,
             'bio_strength': bio_strength,
             'k_dir': k_dir,
             'k_dir_H': k_dir,
@@ -663,7 +665,7 @@ def simulate(
             'differential_mask_config': differential_mask_config if isinstance(differential_mask_config, (str, type(None))) else "Custom Array"
         }
         if data_source == "real":
-            bio_parameters['differential_mask_sum'] = int(differential_mask.sum()) if differential_mask is not None else 0
+            bio_parameters['differential_mask_sum'] = _unwrap([int(_m.sum()) for _m in differential_mask]) if use_real_effect_sizes else int(differential_mask.sum()) if differential_mask is not None else 0
         # Construct batch_parameters
         batch_parameters = {
             'n_batches': n_batches,
@@ -695,8 +697,8 @@ def simulate(
         # Construct bio_signal_params
         bio_signal_params  = {
             'alpha_H': alpha_H.tolist(),
-            'alpha_U': alpha_U.tolist(),
-            'differential_mask': differential_mask.tolist() if differential_mask is not None and hasattr(differential_mask, 'tolist') else None
+            'alpha_U': _unwrap([_a.tolist() for _a in alpha_U]),
+            'differential_mask': _unwrap([_m.tolist() for _m in differential_mask]) if use_real_effect_sizes else differential_mask.tolist() if differential_mask is not None and hasattr(differential_mask, 'tolist') else None
         }
         # Construct sample_info
         sample_info = {
@@ -715,7 +717,7 @@ def simulate(
             metadata['use_real_effect_sizes'] = use_real_effect_sizes
         metadata.update({
             'n_glycans': n_glycans,
-            'n_samples': n_H + n_U,
+            'n_samples': len(labels),
             'bio_parameters': bio_parameters,
             'batch_parameters': batch_parameters,
             'quality_checks': quality_checks,
@@ -724,7 +726,7 @@ def simulate(
         })
         # Add data processing information for transparency and debugging
         if data_source == "real":
-            healthy_prefix_used, unhealthy_prefix_used = healthy_prefix, unhealthy_prefix  # re-reading column_prefix recorded R7/BM whenever glycowork contrasts set the groups
+            healthy_prefix_used, unhealthy_prefix_used = healthy_prefix, _unwrap(unhealthy_prefix)  # re-reading column_prefix recorded R7/BM whenever glycowork contrasts set the groups
             # Add captured glycowork messages first (if any)
             if glycowork_messages:
                 metadata['glycowork_messages'] = glycowork_messages
@@ -742,7 +744,7 @@ def simulate(
             }
         # Add debug info (optional, only in hybrid mode)
         if bio_debug_info is not None:
-            metadata['bio_injection_debug'] = bio_debug_info
+            metadata['bio_injection_debug'] = _unwrap(bio_debug_info)
         # Record batch_effect_direction configuration
         batch_direction_config = {
             'mode': None,

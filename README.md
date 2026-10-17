@@ -14,14 +14,14 @@
 
 ### Installation
 
-* **Python 3.11–3.14 required** (`>=3.11,<3.15`). We recommend creating a dedicated virtual environment:
+* **Python 3.11–3.15 required** (`>=3.11,<3.16`). We recommend creating a dedicated virtual environment:
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 ```
 
-* Core dependency: `glycowork>=1.10.0`
+* Core dependency: `glycowork>=1.11.0`
 
 ```bash
 pip install glycoforge
@@ -59,6 +59,8 @@ All simulation operates in CLR (centered log-ratio) space using a **Gaussian cop
 ## Simulation Modes
 
 `glycoforge.simulate()` generates a single glycomic dataset per entity in two modes controlled by `data_source`. For paired multi-glycome data from the same samples, use `glycoforge.simulate_paired()` instead (see below). Configuration files are in `sample_config/`.
+
+**More than two groups** (e.g., for benchmarking ANOVA and post-hoc tests): pass `n_U` as a list of group sizes. `n_H=10, n_U=[10, 10, 10]` simulates healthy plus three case groups (columns `unhealthy1_*`, `unhealthy2_*`, `unhealthy3_*`; `bio_labels` 0–3), each shifted from healthy by its own effect, with batches stratified within every group. `group_effect_scale` multiplies `bio_strength` per case group, so `[1, 2, 0]` gives a doubled effect and a null group with the same mean as healthy. In synthetic mode the first case group is drawn exactly as in the two-group setup and later ones along random rotations of the same top-eigenvector subspace (or, with `motif_rules`, from separate motif draws); in templated mode with `use_real_effect_sizes=True`, each case group gets the template's own effect sizes against its control group, taken from the glycowork contrasts in order (e.g. `human_prostate_N_PMC8010466`: control vs. stage1, stage2, ...) or from a list of prefixes in `column_prefix['unhealthy']`.
 
 <details>
 <summary><b>Synthetic mode (<code>data_source="simulated"</code>)</b> – Fully synthetic simulation (click to show detail introduction)</summary>
@@ -154,7 +156,7 @@ The [use_cases/batch_correction/](use_cases/batch_correction) directory demonstr
 
 ## Limitation
 
-**Two biological groups only**: Current implementation targets healthy/unhealthy setup. Supporting multi-stage disease (≥3 groups) requires refactoring parameter generation and evaluation metrics.
+**More than two groups in `simulate()` only**: `simulate_paired()`, `simulate_circadian()`, `glycoforge_power()` and `glycoforge_reliability()` still target the healthy/unhealthy setup.
 
 ## Citation
 

@@ -316,7 +316,7 @@ def plot_pca(data,  # DataFrame (features x samples)
     plot_idx = 0
     # Plot biological groups (with batch annotations)
     if bio_groups is not None:
-        bio_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+        bio_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         for i, (group_name, cols) in enumerate(bio_groups.items()):
             indices = [sample_names.index(c) for c in cols if c in sample_names]
             axes[plot_idx].scatter(pca_result[indices, 0], pca_result[indices, 1],
@@ -387,9 +387,9 @@ def _evaluate_bio_effect_details(pc, bio_labels, test_used, ss_total, total_samp
     else:
         bio_eta = (f_bio - len(bio_cat.categories) + 1) / (total_samples - len(bio_cat.categories))
         bio_eta = max(0, min(1, bio_eta))
-    # Centroid distance
+    # Centroid distance (mean over all pairs of groups)
     centroids = [pc[bio_cat == b, :2].mean(axis = 0) for b in bio_cat.categories]
-    centroid_dist = np.linalg.norm(centroids[0] - centroids[1]) if len(centroids) == 2 else 0
+    centroid_dist = np.mean([np.linalg.norm(a - b) for i, a in enumerate(centroids) for b in centroids[i + 1:]]) if len(centroids) > 1 else 0
     # Strength assessment
     if p_bio >= 0.05:
         strength = "ABSENT"

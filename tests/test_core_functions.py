@@ -39,6 +39,29 @@ def test_simulate_data():
     assert len(labels) == 20
 
 
+def test_simulate_multi_group():
+    """n_U as a list: one case group per entry, each shifted only by its own injection, batches stratified per group"""
+    from sklearn.covariance import LedoitWolf
+    from glycoforge.sim_batch_factor import stratified_batches_from_columns
+    rng = np.random.default_rng(0)
+    real_clr_ref = rng.standard_normal((40, 10))
+    Sigma_lw = LedoitWolf().fit(real_clr_ref).covariance_
+    shift = np.zeros(10)
+    shift[:3] = 3.0
+    P, labels = simulate_clean_data(np.ones(10), None, 20, [20, 20, 20], seed=42, real_clr_ref=real_clr_ref,
+                                    Sigma_lw=Sigma_lw, injection=[shift, -shift, np.zeros(10)])
+    assert P.shape == (80, 10)
+    assert np.allclose(P.sum(axis=1), 100.0)
+    assert np.array_equal(np.bincount(labels), [20, 20, 20, 20])
+    means = np.array([clr(P[labels == g]).mean(axis=0) for g in range(4)])
+    assert np.all(means[1, :3] - means[0, :3] > 1.5)
+    assert np.all(means[2, :3] - means[0, :3] < -1.5)
+    assert np.all(np.abs(means[3] - means[0]) < 1.0)  # zero injection = null group
+    _, batch_labels = stratified_batches_from_columns(list(range(80)), n_batches=4, seed=0, verbose=False, labels=labels)
+    for g in range(4):
+        assert np.array_equal(np.bincount(batch_labels[labels == g]), [5, 5, 5, 5])
+
+
 def test_define_bio_injection_from_real_data():
     """Test bio injection parameters from real effect sizes"""
     p_h = np.array([0.2, 0.3, 0.5])

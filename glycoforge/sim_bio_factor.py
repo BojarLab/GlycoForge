@@ -430,11 +430,15 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   signed top eigenvectors; bio_strength controls the effect magnitude,
   scaled by sqrt(n_glycans) to remain PVCA-meaningful across feature counts. In real-data
   mode, injection is a (n_glycans,) vector from define_bio_injection_from_real_data.
+  With n_U a list (more than two groups), injection, alpha_U and bio_strength may be
+  given per case group; each case group is shifted only by its own injection.
   Parameters
   ----------
   alpha_H, alpha_U : (n_glycans,) Dirichlet concentration params for Dirichlet fallback
       AND source of CLR-space injection mu_U - mu_H for copula mode.
-  n_H, n_U : int
+  n_H : int
+  n_U : int, or list of int (one entry per case group; injection and alpha_U are then lists
+      of the same length, bio_strength a scalar or such a list)
   seed : int or None
   verbose : bool
   real_clr_ref : (n_samples, n_glycans) ndarray or None
@@ -450,12 +454,12 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
       output Pearson r matches the requested targets.
   Returns
   -------
-  P : (n_H + n_U, n_glycans) percent-scale compositional data
-  labels : (n_H + n_U,) int, 0 = healthy, 1 = unhealthy
+  P : (n_samples, n_glycans) percent-scale compositional data
+  labels : (n_samples,) int, 0 = healthy, g = case group g (1 = unhealthy)
   """
   rng = np.random.default_rng(seed)
   n_glycans = len(alpha_H)
-  labels = np.array([0] * n_H + [1] * n_U)
+  labels = np.repeat(np.arange(np.size(n_U) + 1), np.append(n_H, n_U))
   if real_clr_ref is None or Sigma_lw is None:
       raise ValueError("real_clr_ref and Sigma_lw are required; Dirichlet fallback has been deprecated.")
   # ── Gaussian copula mode ────────────────────────────────────────────────
@@ -469,9 +473,9 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
       R = _nearest_corr_fixed(R, pair_corr)
   R_reg = R + eps * np.eye(n_glycans)
   # Step 2: Sample Z ~ N(0, R) — preserves LW inter-feature correlation structure
-  Z = rng.multivariate_normal(np.zeros(n_glycans), R_reg, size=n_H + n_U)
+  Z = rng.multivariate_normal(np.zeros(n_glycans), R_reg, size=len(labels))
   # Step 3: Probability integral transform to uniform marginals
-  U = sp_norm.cdf(Z)                                   # (n_H+n_U, n_glycans)
+  U = sp_norm.cdf(Z)                                   # (n_samples, n_glycans)
   # Step 4: Map uniforms to real CLR empirical marginals via linear interpolation
   n_real = real_clr_ref.shape[0]
   sorted_real = np.sort(real_clr_ref, axis=0)          # (n_real, n_glycans)
@@ -480,24 +484,24 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   hi = np.minimum(lo + 1, n_real - 1)
   t = frac_idx - lo
   X = (sorted_real[lo, np.arange(n_glycans)] * (1 - t)
-       + sorted_real[hi, np.arange(n_glycans)] * t)    # (n_H+n_U, n_glycans)
-  # Step 5: Apply CLR-space bio injection to unhealthy rows.
+       + sorted_real[hi, np.arange(n_glycans)] * t)    # (n_samples, n_glycans)
+  # Step 5: Apply CLR-space bio injection to the rows of each case group.
   # mu_H is the healthy CLR mean; mu_U = mu_H + injection from define_dirichlet_params.
   # We recover injection from alpha_H/alpha_U via the same CLR transform used in
   # define_dirichlet_params_from_real_data (p proportional to alpha, then CLR).
   if injection is None:
-      p_H = alpha_H / alpha_H.sum()
-      p_U = alpha_U / alpha_U.sum()
-      injection = clr(p_U) - clr(p_H)
-  if scale_injection:
-      rows = np.atleast_2d(injection)
-      dim_scale = np.sqrt(X.shape[1])
-      stds = np.array([np.std(X @ (row / (np.linalg.norm(row) + 1e-10))) for row in rows])
-      for row, s in zip(rows, stds):
-          d_hat = row / (np.linalg.norm(row) + 1e-10)
-          X[n_H:] += d_hat * bio_strength * s * dim_scale
-  else:
-      X[n_H:] += injection
+      injection = [clr(a / a.sum()) - clr(alpha_H / alpha_H.sum()) for a in (alpha_U if np.ndim(n_U) else [alpha_U])]
+  elif not np.ndim(n_U):
+      injection = [injection]
+  dim_scale = np.sqrt(X.shape[1])
+  X_ref = X.copy()  # scaled shifts are measured on the uninjected draw, so every case group sees the same spread
+  for g, (inj, b) in enumerate(zip(injection, np.broadcast_to(bio_strength, len(injection))), start = 1):
+      if scale_injection:
+          for row in np.atleast_2d(inj):
+              d_hat = row / (np.linalg.norm(row) + 1e-10)
+              X[labels == g] += d_hat * b * np.std(X_ref @ d_hat) * dim_scale
+      else:
+          X[labels == g] += inj
   # Step 6: Softmax back to percent-scale compositions
   shifted = X - X.max(axis=1, keepdims=True)
   exp_v = np.exp(shifted)
