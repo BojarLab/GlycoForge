@@ -132,7 +132,7 @@ def apply_batch_effect(Y_clean, # (samples x glycans) clean CLR matrix
                        seed=42, # Random generator for reproducibility
                        batch_motif_rules=None,
                        glycan_sequences=None,
-                       batch_mode="additive" # "additive": constant CLR shift (ComBat-correctable); "multiplicative": shift ∝ current CLR value (non-linear, outside ComBat assumption)
+                       batch_mode="additive", # "additive": constant CLR shift (ComBat-correctable); "multiplicative": shift ∝ current CLR value (non-linear, outside ComBat assumption)
                        eps = 1e-6
                     ):
     rng = np.random.default_rng(seed)
