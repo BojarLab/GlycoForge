@@ -112,7 +112,8 @@ def simulate(
     output_dir="results/",
     verbose=False,
     save_csv=True,
-    show_pca_plots=None
+    show_pca_plots=None,
+    eps=1e-6
 ):
     # Parse config if batch_effect_direction contains nested structure
     if batch_effect_direction is not None and isinstance(batch_effect_direction, dict) and 'mode' in batch_effect_direction:
@@ -212,7 +213,8 @@ def simulate(
                 'output_dir': sub_dir,
                 'verbose': verbose,
                 'save_csv': save_csv,
-                'show_pca_plots': show_pca_plots
+                'show_pca_plots': show_pca_plots,
+                'eps': eps
             }
             # Update with current grid values
             kwargs.update(current_params)
@@ -606,7 +608,8 @@ def simulate(
             seed=seed,
             batch_motif_rules=batch_motif_rules,
             glycan_sequences=glycan_sequences,
-            batch_mode = batch_mode
+            batch_mode = batch_mode,
+            eps = eps
         )
         Y_with_batch_clr = pd.DataFrame(Y_with_batch_clr_T.T, index=Y_clean_clr.index, columns=Y_clean_clr.columns)
         Y_with_batch = pd.DataFrame(Y_with_batch_T.T, index=Y_clean_clr.index, columns=Y_clean_clr.columns)
@@ -679,7 +682,8 @@ def simulate(
             'missing_mechanism': missing_mechanism,
             'missing_params': missing_params,
             'sigma_mean': float(np.mean(sigma)),
-            'sigma_std': float(np.std(sigma))
+            'sigma_std': float(np.std(sigma)),
+            'eps': eps
         }
         # Construct quality_checks (in data processing order)
         quality_checks = {}

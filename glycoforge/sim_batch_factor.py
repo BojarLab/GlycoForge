@@ -123,16 +123,17 @@ def estimate_sigma(Y):
     return sigma
 
 
-def apply_batch_effect(Y_clean # (samples x glycans) clean CLR matrix
-                       , batch_labels # Array of batch labels for each sample (0-based)
-                       , u_dict # batch effect direction vectors dict {batch_id: direction_vector}
-                       , sigma # Baseline std per glycan (length = n_glycans) in Y_clean_clr data, globally including both healthy and unhealthy
-                       , kappa_mu # mean shift strength control per batch (mean_shift = kappa_mu * sigma * u_b)
-                       , var_b # variance ratio per batch (var_effect = var_b * baseline_variance)
-                       , seed=42 # Random generator for reproducibility
-                       , batch_motif_rules=None
-                       , glycan_sequences=None
-                       , batch_mode="additive" # "additive": constant CLR shift (ComBat-correctable); "multiplicative": shift ∝ current CLR value (non-linear, outside ComBat assumption)
+def apply_batch_effect(Y_clean, # (samples x glycans) clean CLR matrix
+                       batch_labels, # Array of batch labels for each sample (0-based)
+                       u_dict, # batch effect direction vectors dict {batch_id: direction_vector}
+                       sigma, # Baseline std per glycan (length = n_glycans) in Y_clean_clr data, globally including both healthy and unhealthy
+                       kappa_mu, # mean shift strength control per batch (mean_shift = kappa_mu * sigma * u_b)
+                       var_b, # variance ratio per batch (var_effect = var_b * baseline_variance)
+                       seed=42, # Random generator for reproducibility
+                       batch_motif_rules=None,
+                       glycan_sequences=None,
+                       batch_mode="additive", # "additive": constant CLR shift (ComBat-correctable); "multiplicative": shift ∝ current CLR value (non-linear, outside ComBat assumption)
+                       eps = 1e-6
                     ):
     rng = np.random.default_rng(seed)
     Y_with_batch_clr = Y_clean.copy()
@@ -185,5 +186,5 @@ def apply_batch_effect(Y_clean # (samples x glycans) clean CLR matrix
         Y_with_batch_clr[i, :] += mean_shift + var_scalar
     Y_with_batch_compositional = np.zeros_like(Y_with_batch_clr)
     for i in range(n_samples):
-        Y_with_batch_compositional[i, :] = invclr(Y_with_batch_clr[i, :])  # Scale to percentage
+        Y_with_batch_compositional[i, :] = invclr(Y_with_batch_clr[i, :], eps = eps)  # Scale to percentage
     return Y_with_batch_clr, Y_with_batch_compositional
