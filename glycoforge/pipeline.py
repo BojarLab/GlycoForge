@@ -213,7 +213,7 @@ def simulate(
                 'output_dir': sub_dir,
                 'verbose': verbose,
                 'save_csv': save_csv,
-                'show_pca_plots': show_pca_plots
+                'show_pca_plots': show_pca_plots,
                 'eps': eps
             }
             # Update with current grid values
