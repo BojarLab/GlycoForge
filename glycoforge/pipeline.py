@@ -16,10 +16,12 @@ from glycoforge.sim_batch_factor import define_batch_direction, stratified_batch
 from glycoforge.utils import clr, invclr, plot_pca, check_batch_effect, check_bio_effect, apply_missingness, find_compositional_pairs
 
 
-def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
+def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False, max_zero_frac=0.3):
   """Build pooled CLR reference matrix and LW covariance from glycowork datasets.
   Mirrors the synthetic-mode pooling logic in simulate() but as a reusable helper
-  for simulate_paired, which needs separate refs for glycome A and B."""
+  for simulate_paired, which needs separate refs for glycome A and B.
+  A dataset only contributes if each of its top n_glycans is detected in at least one sample
+  and at most max_zero_frac of that block is zero (undetected)."""
   _class_tag = {'GSL': 'lipid'}.get(glycan_class, glycan_class)
   _all_ds_names = dir(glycomics_data_loader) if _class_tag is None else glycomics_data_loader.filter(glycan_class = _class_tag)
   _pooled_clr, _pooled_R, _candidates = [], [], []
@@ -42,12 +44,14 @@ def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
     _top = _sub.mean(axis=1).nlargest(n_glycans).index.tolist()
     _vals = _sub.iloc[_top].values.T
     _vals = _vals[~np.isnan(_vals).any(axis=1)].astype(float)
-    if _vals.shape[0] < 2:
+    # Sparse datasets (many O-glycomes) reach n_glycans only with largely undetected glycans: a never-detected glycan has no
+    # half-minimum and fell to the 1e-6 floor (CLR ~ -11), and mostly-zero blocks inflate the pooled SDs every effect is scaled by
+    if _vals.shape[0] < 2 or not (_vals > 0).any(axis=0).all() or (_vals == 0).mean() > max_zero_frac:
       continue
     # Zeros are this dataset's own missing values; clr's 1e-6 floor would turn them into extreme CLR outliers that the
     # copula then reproduces as quasi-zero "clean" abundances, so substitute half the glycan's minimum observed value
     _half_min = np.min(_vals, axis=0, where=_vals > 0, initial=np.inf) / 2
-    _vals = np.where(_vals > 0, _vals, np.nan_to_num(_half_min, posinf=1e-6))
+    _vals = np.where(_vals > 0, _vals, _half_min)
     _clr_i = clr(_vals)
     if _clr_i.shape[1] < n_glycans:
       continue
@@ -61,7 +65,7 @@ def _build_copula_ref(n_glycans, glycan_class=None, return_candidates=False):
     _candidates.append((_n, [_seqs[_i] for _i in _keep], _sub)) # Sequences aligned with the deduplicated rows of _sub
   if not _pooled_R:
       raise ValueError(
-          f"No glycowork datasets found with >= {n_glycans} glycans for class '{glycan_class}'. Try a lower n_glycans or glycan_class=None.")
+          f"No glycowork datasets found with >= {n_glycans} detected glycans (at most {max_zero_frac:.0%} zeros) for class '{glycan_class}'. Try a lower n_glycans or glycan_class=None.")
   _R_consensus = np.mean(_pooled_R, axis=0)
   np.fill_diagonal(_R_consensus, 1.0)
   _clr_all = np.vstack(_pooled_clr)
@@ -258,7 +262,7 @@ def simulate(
     if data_source == "simulated":
         _clr_all_syn, _Sigma_syn, _candidates, _n_datasets, _class_tag = _build_copula_ref(n_glycans, glycan_class=glycan_class, return_candidates=True)
         _K_bio = min(3, n_glycans - 1)
-        _, _evecs_syn = np.linalg.eigh(_Sigma_syn)
+        _, _evecs_syn = np.linalg.eigh(_Sigma_syn / np.sqrt(np.outer(np.diag(_Sigma_syn), np.diag(_Sigma_syn))))  # correlation, not covariance: high-variance positions would localize the eigenvectors
         _top_evecs_syn = _evecs_syn[:, -_K_bio:]
         # Build alpha_H from pooled mean abundance profile
         _p_h_syn = np.maximum(np.mean(np.vstack([
@@ -451,7 +455,7 @@ def simulate(
             _clr_all_syn = clr(_real_vals.T)
             _Sigma_syn = LedoitWolf().fit(_clr_all_syn).covariance_
             _K_bio = min(3, n_glycans - 1)
-            _, _evecs_syn = np.linalg.eigh(_Sigma_syn)
+            _, _evecs_syn = np.linalg.eigh(_Sigma_syn / np.sqrt(np.outer(np.diag(_Sigma_syn), np.diag(_Sigma_syn))))  # correlation, not covariance: high-variance positions would localize the eigenvectors
             _top_evecs_syn = _evecs_syn[:, -_K_bio:]
         # Quick check: Original real data bio effect (only in hybrid mode)
         original_data_bio_check = None
@@ -597,7 +601,7 @@ def simulate(
             labels=labels
         )
         Y_clean_T = Y_clean_clr.T.values
-        sigma = estimate_sigma(Y_clean_clr)
+        sigma = estimate_sigma(Y_clean_clr, labels)
         Y_with_batch_clr_T, Y_with_batch_T = apply_batch_effect(
             Y_clean=Y_clean_T,
             batch_labels=batch_labels,
@@ -1011,10 +1015,10 @@ def simulate_paired(
   _clr_ref_A, _Sigma_A = _build_copula_ref(n_glycans_A, glycan_class = glycan_class_A)
   _clr_ref_B, _Sigma_B = _build_copula_ref(n_glycans_B, glycan_class = glycan_class_B)
   _K_bio_A = min(3, n_glycans_A - 1)
-  _, _evecs_A = np.linalg.eigh(_Sigma_A)
+  _, _evecs_A = np.linalg.eigh(_Sigma_A / np.sqrt(np.outer(np.diag(_Sigma_A), np.diag(_Sigma_A))))  # correlation, not covariance: high-variance positions would localize the eigenvectors
   _top_evecs_A = _evecs_A[:, -_K_bio_A:]
   _K_bio_B = min(3, n_glycans_B - 1)
-  _, _evecs_B = np.linalg.eigh(_Sigma_B)
+  _, _evecs_B = np.linalg.eigh(_Sigma_B / np.sqrt(np.outer(np.diag(_Sigma_B), np.diag(_Sigma_B))))  # correlation, not covariance: high-variance positions would localize the eigenvectors
   _top_evecs_B = _evecs_B[:, -_K_bio_B:]
   u_dict_A, _ = define_batch_direction(
       n_glycans = n_glycans_A, n_batches = n_batches,
@@ -1129,8 +1133,8 @@ def simulate_paired(
     batch_groups, batch_labels = stratified_batches_from_columns(
       sample_cols, n_batches=n_batches, seed=seed, verbose=verbose
     )
-    sigma_A = estimate_sigma(Y_A_clean_clr)
-    sigma_B = estimate_sigma(Y_B_clean_clr)
+    sigma_A = estimate_sigma(Y_A_clean_clr, bio_labels)
+    sigma_B = estimate_sigma(Y_B_clean_clr, bio_labels)
     # apply_batch_effect expects (n_samples × n_glycans); .T.values transposes
     Y_A_batch_clr_T, Y_A_batch_T = apply_batch_effect(
       Y_clean=Y_A_clean_clr.T.values, batch_labels=batch_labels,

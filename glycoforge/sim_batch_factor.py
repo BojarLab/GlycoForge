@@ -114,8 +114,13 @@ def stratified_batches_from_columns(columns, n_batches=3, seed=None, verbose=Tru
                                 #batch_labels: np.array of 0-based batch assignments for analysis
 
 
-def estimate_sigma(Y):
-    """Estimate baseline std (sigma) per glycan (global, across all samples)."""
+def estimate_sigma(Y, labels=None):
+    """Estimate baseline std (sigma) per glycan (global, across all samples). With labels (one per sample), the pooled
+    within-group std instead, so the simulated group separation does not inflate the batch shifts and noise built on sigma."""
+    if labels is not None:
+        Y, labels = np.asarray(Y, dtype=float), np.asarray(labels)
+        ss = sum(((Y[:, labels == g] - Y[:, labels == g].mean(axis=1, keepdims=True)) ** 2).sum(axis=1) for g in np.unique(labels))
+        return np.sqrt(ss / (Y.shape[1] - len(np.unique(labels))))
     if isinstance(Y, pd.DataFrame):
         sigma = Y.std(axis=1, ddof=1).to_numpy()
     else:  # numpy array

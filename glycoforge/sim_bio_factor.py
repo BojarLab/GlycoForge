@@ -426,9 +426,10 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   (extracted via define_dirichlet_params_from_real_data) shifts the unhealthy mean.
   This gives strictly better marginal realism (KS) than MVN while preserving correlation
   structure (Mantel r) comparable to Ledoit-Wolf MVN sampling.
-  In synthetic mode, injection is a (K_bio, n_glycans) matrix of
-  signed top eigenvectors; bio_strength controls the effect magnitude,
-  scaled by sqrt(n_glycans) to remain PVCA-meaningful across feature counts. In real-data
+  In synthetic mode, injection is a (K_bio, n_glycans) matrix of signed top correlation
+  eigenvectors; each glycan shifts by bio_strength times its own SD times its entry in the
+  sqrt(n_glycans)-scaled pattern (RMS 1, capped at 3, averaged over the K_bio directions), so
+  per-glycan effect sizes and the PVCA group share do not grow with n_glycans. In real-data
   mode, injection is a (n_glycans,) vector from define_bio_injection_from_real_data.
   With n_U a list (more than two groups), injection, alpha_U and bio_strength may be
   given per case group; each case group is shifted only by its own injection.
@@ -493,13 +494,14 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
       injection = [clr(a / a.sum()) - clr(alpha_H / alpha_H.sum()) for a in (alpha_U if np.ndim(n_U) else [alpha_U])]
   elif not np.ndim(n_U):
       injection = [injection]
-  dim_scale = np.sqrt(X.shape[1])
-  X_ref = X.copy()  # scaled shifts are measured on the uninjected draw, so every case group sees the same spread
+  sd_ref = X.std(axis = 0)  # scaled shifts are measured on the uninjected draw, so every case group sees the same spread
   for g, (inj, b) in enumerate(zip(injection, np.broadcast_to(bio_strength, len(injection))), start = 1):
       if scale_injection:
-          for row in np.atleast_2d(inj):
-              d_hat = row / (np.linalg.norm(row) + 1e-10)
-              X[labels == g] += d_hat * b * np.std(X_ref @ d_hat) * dim_scale
+          # Scaling a unit direction by sqrt(n_glycans) SDs along it put up to bio_strength * sqrt(n_glycans) SDs on the few
+          # glycans a localized eigenvector loads on (max shifts of 13-40 CLR units vs ~1-2.5 between real groups)
+          rows = np.atleast_2d(inj)
+          d = np.clip(np.sqrt(n_glycans) * rows / (np.linalg.norm(rows, axis = 1, keepdims = True) + 1e-10), -3, 3)
+          X[labels == g] += b * sd_ref * d.sum(axis = 0) / np.sqrt(len(rows))
       else:
           X[labels == g] += inj
   # Step 6: Softmax back to percent-scale compositions

@@ -74,7 +74,7 @@ No real data dependency. Ideal for controlled experiments with known ground trut
 1. Pools all class-matched glycowork datasets (filtered by `glycan_class`) to build a consensus Ledoit-Wolf correlation matrix and empirical CLR marginals via `_build_copula_ref`
 2. Constructs `alpha_H` from the pooled mean abundance profile across all candidate datasets, scaled to sum proportional to `10 * n_glycans`
 3. For each random seed, generates `alpha_U` by randomly scaling `alpha_H` (30% up, 35% down by default), or via motif-guided compositional pairing if `motif_rules` is provided
-4. Samples clean cohorts via Gaussian copula (LW correlation + empirical marginals) with biological injection along top-K eigenvectors of the pooled covariance, scaled by `bio_strength`
+4. Samples clean cohorts via Gaussian copula (LW correlation + empirical marginals) with biological injection along top-K eigenvectors of the pooled correlation matrix, each glycan shifted by `bio_strength` times its own SD (capped at 3 SD per direction)
 5. Defines batch effect direction vectors `u_dict` once per simulation run (fixed seed ensures reproducible batch geometry across parameter sweep)
 6. Applies batch effects controlled by `kappa_mu` (shift strength) and `var_b` (variance scaling)
 7. Optionally applies missingness:

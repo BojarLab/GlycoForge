@@ -12,6 +12,7 @@ tags
 /build/
 /_proc/
 CLAUDE.md
+.stfolder/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
