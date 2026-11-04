@@ -5,15 +5,14 @@ import tempfile
 import warnings
 import zipfile
 import contextlib
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
+import viscose as vc
 from sklearn.decomposition import PCA
 
 warnings.filterwarnings("ignore")
+vc.default_palette("aura")
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -24,41 +23,31 @@ st.set_page_config(
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+def _show(fig):
+  """Show a viscose Figure on the page."""
+  st.image(fig.to_png(dpi=144), width='content')
+
+
 def _pca_fig(df_clr, bio_groups, batch_groups=None, title=""):
-  """Return a matplotlib Figure with 1 or 2 PCA panels."""
+  """Return a viscose Figure with 1 or 2 PCA panels."""
   X = df_clr.values.T
   pca = PCA(n_components=2)
   coords = pca.fit_transform(X)
   sample_names = df_clr.columns.tolist()
-  n_panels = 1 + (batch_groups is not None)
-  fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 4.5))
-  if n_panels == 1:
-    axes = [axes]
-  bio_colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
-  for g_idx, (gname, gcols) in enumerate(bio_groups.items()):
-    idxs = [sample_names.index(c) for c in gcols if c in sample_names]
-    axes[0].scatter(coords[idxs, 0], coords[idxs, 1],
-                    c=bio_colors[g_idx % len(bio_colors)],
-                    label=gname, alpha=0.8, s=60, edgecolors="white", linewidths=0.5)
-  axes[0].set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%})")
-  axes[0].set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%})")
-  axes[0].set_title(f"{title}\n(by group)")
-  axes[0].legend(fontsize=8)
-  axes[0].grid(alpha=0.25)
+  panels = [("by group", list(bio_groups.items()))]
   if batch_groups is not None:
-    batch_colors = ["#2ca02c","#d62728","#9467bd","#8c564b","#e377c2","#FF6B35"]
-    for b_idx, (bid, bcols) in enumerate(sorted(batch_groups.items())):
-      idxs = [sample_names.index(c) for c in bcols if c in sample_names]
-      axes[1].scatter(coords[idxs, 0], coords[idxs, 1],
-                      c=batch_colors[b_idx % len(batch_colors)],
-                      label=f"Batch {bid}", alpha=0.8, s=60,
-                      edgecolors="white", linewidths=0.5)
-    axes[1].set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%})")
-    axes[1].set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%})")
-    axes[1].set_title(f"{title}\n(by batch)")
-    axes[1].legend(fontsize=8)
-    axes[1].grid(alpha=0.25)
-  fig.tight_layout()
+    panels.append(("by batch", [(f"Batch {bid}", bcols) for bid, bcols in sorted(batch_groups.items())]))
+  fig, axes = vc.subplots(1, len(panels), figsize=(6 * len(panels), 4.5))
+  axes = [axes] if len(panels) == 1 else axes
+  for ax, (colored_by, groups) in zip(axes, panels):
+    for color, (gname, gcols) in zip(fig.pal.contrast(len(groups)), groups):
+      idxs = [sample_names.index(c) for c in gcols if c in sample_names]
+      ax.scatter(coords[idxs, 0], coords[idxs, 1], color=color, label=gname, s=60)
+    ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%})")
+    ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%})")
+    ax.set_title(f"{title}\n({colored_by})")
+    ax.legend()
+    ax.grid()
   return fig
 
 
@@ -68,17 +57,14 @@ def _pvca_bar(pvca_dict):
   vals = [pvca_dict["batch_variance_pct"],
           pvca_dict["bio_variance_pct"],
           pvca_dict["residual_variance_pct"]]
-  colors = ["#d62728", "#1f77b4", "#7f7f7f"]
-  fig, ax = plt.subplots(figsize=(5, 1.8))
-  bars = ax.barh(labels, vals, color=colors, edgecolor="white", height=0.5)
+  fig, ax = vc.subplots(figsize=(5, 1.8))
+  ax.barh(range(3), vals, color=["a1", "b1", "muted"])
+  ax.set_yticks(range(3), labels)
   ax.set_xlim(0, 100)
   ax.set_xlabel("% variance")
   ax.set_title("PVCA variance decomposition")
-  for bar, val in zip(bars, vals):
-    ax.text(val + 0.5, bar.get_y() + bar.get_height() / 2,
-            f"{val:.1f}%", va="center", fontsize=9)
-  ax.grid(axis="x", alpha=0.25)
-  fig.tight_layout()
+  for i, val in enumerate(vals):
+    ax.text(val + 0.5, i, f"{val:.1f}%", size=9)
   return fig
 
 
@@ -216,7 +202,7 @@ if sim_type == "Power analysis":
         st.code(traceback.format_exc())
       st.stop()
   bar.empty()
-  st.pyplot(fig, width='content')
+  _show(fig)
   st.subheader("Sample size for 80% power")
   summary = []
   for (lvl, eff), grp in results.groupby(["level", "effect"]):
@@ -423,14 +409,14 @@ with tempfile.TemporaryDirectory() as tmp_dir:
       col_a, col_b = st.columns(2)
       with col_a:
         st.subheader("Glycome A — Clean")
-        st.pyplot(_pca_fig(run0["Y_A_clean_clr"], bio_groups, title="A clean CLR"), width='content')
+        _show(_pca_fig(run0["Y_A_clean_clr"], bio_groups, title="A clean CLR"))
         st.subheader("Glycome A — Final")
-        st.pyplot(_pca_fig(run0["Y_A_final"], bio_groups, batch_groups, title="A final CLR"), width='content')
+        _show(_pca_fig(run0["Y_A_final"], bio_groups, batch_groups, title="A final CLR"))
       with col_b:
         st.subheader("Glycome B — Clean")
-        st.pyplot(_pca_fig(run0["Y_B_clean_clr"], bio_groups, title="B clean CLR"), width='content')
+        _show(_pca_fig(run0["Y_B_clean_clr"], bio_groups, title="B clean CLR"))
         st.subheader("Glycome B — Final")
-        st.pyplot(_pca_fig(run0["Y_B_final"], bio_groups, batch_groups, title="B final CLR"), width='content')
+        _show(_pca_fig(run0["Y_B_final"], bio_groups, batch_groups, title="B final CLR"))
     with tab_data:
       st.subheader("Preview: Glycome A clean")
       st.dataframe(run0["Y_A_clean"].head(10).round(4), width='stretch')
@@ -518,15 +504,13 @@ with tempfile.TemporaryDirectory() as tmp_dir:
     with tab_pca:
       st.subheader("Clean data (before batch effects)")
       if Y_clean_clr is not None:
-        st.pyplot(_pca_fig(Y_clean_clr, bio_groups, title="Clean CLR"), width='content')
+        _show(_pca_fig(Y_clean_clr, bio_groups, title="Clean CLR"))
       st.subheader("After batch effect injection")
       if Y_batch_clr is not None:
-        st.pyplot(_pca_fig(Y_batch_clr, bio_groups, batch_groups, title="Batch CLR"),
-                  width='content')
+        _show(_pca_fig(Y_batch_clr, bio_groups, batch_groups, title="Batch CLR"))
       if Y_missing_clr is not None:
         st.subheader("After batch + missingness")
-        st.pyplot(_pca_fig(Y_missing_clr, bio_groups, batch_groups, title="Missing CLR"),
-                  width='content')
+        _show(_pca_fig(Y_missing_clr, bio_groups, batch_groups, title="Missing CLR"))
     with tab_metrics:
       st.subheader("Biological signal quality")
       bio_eff = bio_check_clean.get("bio_effect", {})
@@ -538,7 +522,7 @@ with tempfile.TemporaryDirectory() as tmp_dir:
       if pvca:
         col_a, col_b = st.columns([1.2, 1])
         with col_a:
-          st.pyplot(_pvca_bar(pvca), width='content')
+          _show(_pvca_bar(pvca))
         with col_b:
           severity = overall.get("severity", "—")
           colour = {"NONE":"🟢","GOOD":"🟢","MILD":"🟡",

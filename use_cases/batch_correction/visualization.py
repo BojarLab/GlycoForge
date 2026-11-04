@@ -1,11 +1,72 @@
 
 import glob
 import json
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Patch
 import os
+import viscose as vc
 from collections import defaultdict
+
+# Aura unless the user chose another palette with viscose.set_palette, before or after importing this
+vc.default_palette('aura')
+
+
+def _finish(fig, save_path, note=None, show=True):
+    """Save a figure if given a path, then show it; only an unsaved figure may open the system's image viewer"""
+    if save_path:
+        fig.save(save_path)
+        if note:
+            print(note)
+    if show:
+        fig.show(viewer=not save_path)
+
+
+def _trace(ax, x, means, stds, color, label, marker='o', dash=None):
+    """A line through its means, with error bars"""
+    ax.errorbar(x, means, stds, color=color)
+    ax.plot(x, means, color=color, lw=2, label=label, marker=marker, dash=dash)
+
+
+def _shade(ax, x, batch, corrected, higher_better=True, good_label='Improvement', bad_label='Degradation'):
+    """Shade the gap between two curves in one hue where correction helped and in the other where it hurt"""
+    # Curves can cross between two positions, so the gap is followed on a fine grid, or the shading would leave the curves there
+    grid = np.linspace(x[0], x[-1], 50 * len(x))
+    batch, corrected = np.interp(grid, x, batch), np.interp(grid, x, corrected)
+    above, below = np.maximum(batch, corrected), np.minimum(batch, corrected)
+    ax.fill_between(grid, batch, above if higher_better else below, color='b2', alpha=0.35, label=good_label)
+    ax.fill_between(grid, batch, below if higher_better else above, color='a2', alpha=0.35, label=bad_label)
+
+
+def _value_labels(ax, x, means, stds, fmt, size, bold=False):
+    """Write each bar's value just past its error bar"""
+    for xi, mean, std in zip(x, means, stds):
+        ax.text(xi, mean + (std if mean >= 0 else -std), fmt.format(mean), size=size, bold=bold, ha='center', va='bottom' if mean >= 0 else 'top', halo=2.6)
+
+
+def _verdict_bars(ax, means, stds, good, labels, good_label, bad_label, fmt):
+    """Bars in one hue where a metric did well and in the other where it did not"""
+    x, means, stds, good = np.arange(len(means)), np.array(means), np.array(stds), np.array(good)
+    ax.bar(x[good], means[good], color='b1', label=good_label)
+    ax.bar(x[~good], means[~good], color='a1', label=bad_label)
+    ax.errorbar(x, means, stds)
+    _value_labels(ax, x, means, stds, fmt, 11, bold=True)
+    ax.set_xticks(x, labels, rotation=45)
+    ax.legend()
+    ax.grid()
+
+
+def _mask_bars(ax, stats, metrics, labels):
+    """One group of bars per metric, one bar per mask configuration"""
+    x = np.arange(len(metrics))
+    width = 0.8 / len(stats)
+    for i, (color, (mask_name, data)) in enumerate(zip(ax.pal.colors(len(stats)), stats.items())):
+        means, stds = (np.array([data[m][k] for m in metrics]) for k in ('mean', 'std'))
+        positions = x + (i - (len(stats) - 1) / 2) * width
+        ax.bar(positions, means, width, color=color, label=mask_name)
+        ax.errorbar(positions, means, stds)
+        _value_labels(ax, positions, means, stds, '{:.1f}', 9)
+    ax.set_xticks(x, [labels[m] for m in metrics])
+    ax.legend()
+    ax.grid()
 
 
 def calculate_batch_correction_changes(before_metrics, after_metrics):
@@ -256,16 +317,14 @@ class SingleRunPlotter:
         # Create visualization
         if len(change_metrics) > 0 and len(ratio_metrics) > 0:
             # Two subplots with different widths: left plot 3x wider than right plot
-            fig = plt.figure(figsize=(16, 8))
-            ax1 = plt.subplot(1, 4, (1, 3))  # Takes columns 1-3 (3/4 of width)
-            ax2 = plt.subplot(1, 4, 4)       # Takes column 4 (1/4 of width)
+            fig, (ax1, ax2) = vc.subplots(1, 2, figsize=(16, 8), width_ratios=[3, 1])
         elif len(change_metrics) > 0:
             # Only change metrics
-            fig, ax1 = plt.subplots(1, 1, figsize=(12, 8))
+            fig, ax1 = vc.subplots(1, 1, figsize=(12, 8))
             ax2 = None
         elif len(ratio_metrics) > 0:
             # Only ratio metrics
-            fig, ax2 = plt.subplots(1, 1, figsize=(6, 8))
+            fig, ax2 = vc.subplots(1, 1, figsize=(6, 8))
             ax1 = None
         else:
             print("No valid metrics found for plotting!")
@@ -276,74 +335,26 @@ class SingleRunPlotter:
             change_labels = [f"{metric_info[m]['name']}\n({'↓' if metric_info[m]['better'] == 'Lower' else '↑'} better)" for m in change_metrics]
             change_means = [summary_stats[m]['mean'] for m in change_metrics]
             change_stds = [summary_stats[m]['std'] for m in change_metrics]
-            
-            change_colors = []
-            for i, metric in enumerate(change_metrics):
-                if metric_info[metric]['better'] == 'Lower':
-                    color = 'green' if change_means[i] < 0 else 'red'
-                else:
-                    color = 'green' if change_means[i] > 0 else 'red'
-                change_colors.append(color)
-            
-            bars1 = ax1.bar(range(len(change_metrics)), change_means, yerr=change_stds, 
-                           capsize=5, alpha=0.7, color=change_colors, edgecolor='black')
-            
-            ax1.set_ylabel('Percentage Change (%)', fontsize=14, fontweight='bold')
-            ax1.set_title(f'Batch Effect Reduction\n (after - before)/before * 100 \n(Mean ± SD across {n_runs} runs)', fontsize=16, fontweight='bold')
-            ax1.set_xticks(range(len(change_metrics)))
-            ax1.set_xticklabels(change_labels, rotation=45, ha='right', fontsize=12)
-            ax1.tick_params(axis='y', labelsize=12)
-            ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-            ax1.grid(True, alpha=0.3)
-            
-            for i, (bar, mean_val, std_val) in enumerate(zip(bars1, change_means, change_stds)):
-                height = bar.get_height()
-                ax1.text(bar.get_x() + bar.get_width()/2., height + (std_val if height >= 0 else -std_val),
-                        f'{mean_val:+.1f}%', ha='center', va='bottom' if height >= 0 else 'top', fontsize=11, fontweight='bold')
-            
-            # Add legend for change metrics
-            legend_elements1 = [Patch(facecolor='green', alpha=0.7, label='Improvement'),
-                               Patch(facecolor='red', alpha=0.7, label='Worsening')]
-            ax1.legend(handles=legend_elements1, loc='upper right', fontsize=11)
-        
+
+            change_good = [mean < 0 if metric_info[m]['better'] == 'Lower' else mean > 0 for m, mean in zip(change_metrics, change_means)]
+            _verdict_bars(ax1, change_means, change_stds, change_good, change_labels, 'Improvement', 'Worsening', '{:+.1f}%')
+            ax1.set_ylabel('Percentage Change (%)')
+            ax1.set_title(f'Batch Effect Reduction\n (after - before)/before * 100 \n(Mean ± SD across {n_runs} runs)')
+            ax1.axhline(y=0, color='ink', dash=None)
+
         # Plot 2: Ratio metrics (preservation percentages)
         if ratio_metrics and ax2 is not None:
             ratio_labels = [f"{metric_info[m]['name']}\n({'↑' if metric_info[m]['better'] == 'Higher' else '↓'} better)" for m in ratio_metrics]
             ratio_means = [summary_stats[m]['mean'] for m in ratio_metrics]
             ratio_stds = [summary_stats[m]['std'] for m in ratio_metrics]
-            
-            ratio_colors = ['green' if ratio_means[i] > 50 else 'red' for i in range(len(ratio_metrics))]
-            
-            bars2 = ax2.bar(range(len(ratio_metrics)), ratio_means, yerr=ratio_stds,
-                           capsize=5, alpha=0.7, color=ratio_colors, edgecolor='black')
-            
-            ax2.set_title(f'Biological Signal Preservation\n after/before * 100 \n(Mean ± SD across {n_runs} runs)', fontsize=16, fontweight='bold')
-            ax2.set_xticks(range(len(ratio_metrics)))
-            ax2.set_xticklabels(ratio_labels, rotation=45, ha='right', fontsize=12)
-            ax2.tick_params(axis='y', labelsize=12)
-            ax2.axhline(y=100, color='black', linestyle='--', alpha=0.5, label='Perfect Preservation')
-            ax2.axhline(y=50, color='gray', linestyle=':', alpha=0.5, label='Threshold (50%)')
-            ax2.grid(True, alpha=0.3)
-            
-            for i, (bar, mean_val, std_val) in enumerate(zip(bars2, ratio_means, ratio_stds)):
-                height = bar.get_height()
-                ax2.text(bar.get_x() + bar.get_width()/2., height + std_val + 2,
-                        f'{mean_val:.1f}%', ha='center', va='bottom', fontsize=11, fontweight='bold')
-            
-            # Add legend for ratio metrics
-            legend_elements2 = [Patch(facecolor='green', alpha=0.7, label='Good(>50%)'),
-                               Patch(facecolor='red', alpha=0.7, label='Poor(<=50%)')]
-            ax2.legend(handles=legend_elements2, loc='upper right', fontsize=11)
-        
-        plt.tight_layout()
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"Plot saved to: {save_path}")
-        if self.verbose:
-            plt.show()
-        else:
-            plt.close()
-    
+
+            _verdict_bars(ax2, ratio_means, ratio_stds, [mean > 50 for mean in ratio_means], ratio_labels, 'Good (>50%)', 'Poor (<=50%)', '{:.1f}%')
+            ax2.set_title(f'Biological Signal Preservation\n after/before * 100 \n(Mean ± SD across {n_runs} runs)')
+            ax2.axhline(y=100, color='ink', dash=(4, 3), label='Perfect Preservation')
+            ax2.axhline(y=50, color='muted', label='Threshold (50%)')
+
+        _finish(fig, save_path, f"Plot saved to: {save_path}", show=self.verbose)
+
     def _load_data(self):
         """Load metrics from all seeds in the directory"""
         json_files = glob.glob(f"{self.run_dir}/correction_metrics_seed*.json")
@@ -635,35 +646,18 @@ class ParameterGridPlotter:
             'compositional_effect_size': {'name': 'Compositional Effect Size', 'better': 'Lower'},
             'pca_batch_effect': {'name': 'PCA Batch Effect', 'better': 'Lower'}
         }
-        
-        fig1, ax1 = plt.subplots(1, 1, figsize=(12, 8))
-        
-        academic_colors = {
-            'silhouette': "#155D34",
-            'kBET': "#165A92",
-            'LISI': '#2C3E50',
-            'ARI': "#9E20A2",
-            'compositional_effect_size': "#6AA70E",
-            'pca_batch_effect': "#C31D20"
-        }
-        
-        marker_config = {
-            'silhouette': ('o', 'full'),
-            'kBET': ('o', 'none'),
-            'LISI': ('s', 'full'),
-            'ARI': ('^', 'none'),
-            'compositional_effect_size': ('s', 'full'),
-            'pca_batch_effect': ('^', 'none')
-        }
-        
+
+        fig1, ax1 = vc.subplots(1, 1, figsize=(12, 8))
+        colors = dict(zip(change_metric_names, fig1.pal.colors(len(change_metric_names))))
+        markers = dict(zip(change_metric_names, ['o', 'D', 's', '^', 'P', 'v']))
+
         for idx, (metric_name, metric_data) in enumerate(change_metrics.items()):
             means, stds = self._extract_metric_values(metric_data)
             
             direction = "↑" if metric_info[metric_name]['better'] == 'Higher' else "↓"
             label = f"{metric_info[metric_name]['name']} {direction}"
-            
-            color = academic_colors.get(metric_name, '#2C3E50')
-            marker, fillstyle = marker_config.get(metric_name, ('o', 'full'))
+
+            color = colors[metric_name]
             
             clipped_means = []
             clipped_stds = []
@@ -674,20 +668,12 @@ class ParameterGridPlotter:
                     clipped_mean = y_min
                     clipped_means.append(clipped_mean)
                     clipped_stds.append(0)
-                    ax1.text(self.x_pos[i], clipped_mean + 5,
-                            f'{mean_val:.0f}±{std_val:.0f}',
-                            ha='center', va='bottom',
-                            fontsize=9, fontweight='bold', color=color,
-                            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.9, edgecolor=color))
+                    ax1.text(self.x_pos[i], clipped_mean + 5, f'{mean_val:.0f}±{std_val:.0f}', size=9, bold=True, color=color, ha='center', va='bottom', halo=2.6)
                 elif mean_val > y_max:
                     clipped_mean = y_max
                     clipped_means.append(clipped_mean)
                     clipped_stds.append(0)
-                    ax1.text(self.x_pos[i], clipped_mean - 5,
-                            f'{mean_val:.0f}±{std_val:.0f}',
-                            ha='center', va='top',
-                            fontsize=9, fontweight='bold', color=color,
-                            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.9, edgecolor=color))
+                    ax1.text(self.x_pos[i], clipped_mean - 5, f'{mean_val:.0f}±{std_val:.0f}', size=9, bold=True, color=color, ha='center', va='top', halo=2.6)
                 else:
                     error_top = mean_val + std_val
                     error_bottom = mean_val - std_val
@@ -699,46 +685,20 @@ class ParameterGridPlotter:
                         clipped_stds.append(std_val)
                     
                     clipped_means.append(mean_val)
-            
-            if fillstyle == 'full':
-                face_color = color
-                edge_color = color
-                edge_width = 1
-            else:
-                face_color = 'none'
-                edge_color = color
-                edge_width = 2
-            
-            linestyle = '-'
-            linewidth = 2
-            markersize = 10
-            
-            ax1.errorbar(self.x_pos, clipped_means, yerr=clipped_stds,
-                        label=label, marker=marker, capsize=3,
-                        color=color, linestyle=linestyle,
-                        markersize=markersize, linewidth=linewidth,
-                        markerfacecolor=face_color,
-                        markeredgecolor=edge_color,
-                        markeredgewidth=edge_width)
-        
-        ax1.set_title('Batch Effect Change Metrics\n(↑ = positive better, ↓ = negative better)\nChange% = (after-before)/before×100',
-                     fontweight='bold', fontsize=16)
-        ax1.set_ylabel('Percentage Change (%)', fontsize=14)
-        ax1.set_xlabel('Parameter Combinations', fontsize=14)
+
+            _trace(ax1, self.x_pos, clipped_means, clipped_stds, color, label, markers[metric_name])
+
+        ax1.set_title('Batch Effect Change Metrics\n(↑ = positive better, ↓ = negative better)\nChange% = (after-before)/before×100')
+        ax1.set_ylabel('Percentage Change (%)')
+        ax1.set_xlabel('Parameter Combinations')
         ax1.set_ylim(-160, 30)
-        ax1.set_xticks(self.x_pos)
-        ax1.set_xticklabels(self.combo_labels, rotation=45, ha='right', fontsize=12)
-        ax1.legend(loc='upper right', fontsize=11)
-        ax1.grid(True, alpha=0.3)
-        ax1.axhline(y=0, color='black', linestyle='-', alpha=0.5)
-        
-        plt.tight_layout()
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            if self.verbose:
-                print(f"Change metrics plot saved to: {save_path}")
-        plt.show()
-    
+        ax1.set_xticks(self.x_pos, self.combo_labels, rotation=45)
+        ax1.legend()
+        ax1.grid()
+        ax1.axhline(y=0, color='ink', dash=None)
+
+        _finish(fig1, save_path, f"Change metrics plot saved to: {save_path}" if self.verbose else None)
+
     def _plot_bio_preservation(self, save_path):
         """Internal: Plot biological signal preservation"""
         BIO_VAR = 'biological_variability'
@@ -747,96 +707,34 @@ class ParameterGridPlotter:
         if not (BIO_VAR in self.batch_vs_clean and BIO_VAR in self.corrected_vs_clean and
                 CONSERVED in self.batch_vs_clean and CONSERVED in self.corrected_vs_clean):
             return
-        
-        fig2, (ax2_top, ax2_bottom) = plt.subplots(2, 1, figsize=(12, 14))
-        
-        # Extract data for biological variability
-        corrected_biovar_means, corrected_biovar_stds = self._extract_metric_values(self.corrected_vs_clean[BIO_VAR])
-        batch_biovar_means, batch_biovar_stds = self._extract_metric_values(self.batch_vs_clean[BIO_VAR])
-        
-        # Extract data for conserved differential
-        corrected_conserved_means, corrected_conserved_stds = self._extract_metric_values(self.corrected_vs_clean[CONSERVED])
-        batch_conserved_means, batch_conserved_stds = self._extract_metric_values(self.batch_vs_clean[CONSERVED])
-        
-        # Top subplot: Biological Variability
-        improvement_biovar = np.array(corrected_biovar_means) - np.array(batch_biovar_means)
-        ax2_top.fill_between(self.x_pos, batch_biovar_means, corrected_biovar_means,
-                            where=(improvement_biovar > 0),
-                            color='green', alpha=0.2, interpolate=True,
-                            label='Improvement (↑ signal recovery)')
-        ax2_top.fill_between(self.x_pos, batch_biovar_means, corrected_biovar_means,
-                            where=(improvement_biovar <= 0),
-                            color='red', alpha=0.2, interpolate=True,
-                            label='Degradation (↓ over-correction)')
-        
-        ax2_top.errorbar(self.x_pos, corrected_biovar_means, yerr=corrected_biovar_stds,
-                    label='Y_corrected vs Y_clean',
-                    marker='o', capsize=3, color='#2E7D32', linestyle='-',
-                    markersize=8, linewidth=2, markerfacecolor='#2E7D32',
-                    markeredgecolor='#2E7D32', markeredgewidth=1, zorder=3)
-        
-        ax2_top.errorbar(self.x_pos, batch_biovar_means, yerr=batch_biovar_stds,
-                    label='Y_with_batch vs Y_clean',
-                    marker='o', capsize=3, color='#FF6347', linestyle='--',
-                    markersize=8, linewidth=2, markerfacecolor='#FF6347',
-                    markeredgecolor='#FF6347', markeredgewidth=1, zorder=3)
-        
-        ax2_top.set_title('Biological Variability Preservation', fontweight='bold', fontsize=16)
-        ax2_top.set_ylabel('Preservation Rate (%)', fontsize=14)
-        ax2_top.set_xticks(self.x_pos)
-        ax2_top.set_xticklabels(self.combo_labels, rotation=45, ha='right', fontsize=12)
-        ax2_top.legend(loc='best', fontsize=11)
-        ax2_top.grid(True, alpha=0.3)
-        
-        # Bottom subplot: Conserved Differential
-        improvement_conserved = np.array(corrected_conserved_means) - np.array(batch_conserved_means)
-        ax2_bottom.fill_between(self.x_pos, batch_conserved_means, corrected_conserved_means,
-                               where=(improvement_conserved > 0),
-                               color='green', alpha=0.2, interpolate=True,
-                               label='Improvement (↑ signal recovery)')
-        ax2_bottom.fill_between(self.x_pos, batch_conserved_means, corrected_conserved_means,
-                               where=(improvement_conserved <= 0),
-                               color='red', alpha=0.2, interpolate=True,
-                               label='Degradation (↓ over-correction)')
-        
-        ax2_bottom.errorbar(self.x_pos, corrected_conserved_means, yerr=corrected_conserved_stds,
-                    label='Y_corrected vs Y_clean',
-                    marker='s', capsize=3, color='#2E7D32', linestyle='-',
-                    markersize=8, linewidth=2, markerfacecolor='#2E7D32',
-                    markeredgecolor='#2E7D32', markeredgewidth=1, zorder=3)
-        
-        ax2_bottom.errorbar(self.x_pos, batch_conserved_means, yerr=batch_conserved_stds,
-                    label='Y_with_batch vs Y_clean',
-                    marker='s', capsize=3, color='#FF6347', linestyle='--',
-                    markersize=8, linewidth=2, markerfacecolor='#FF6347',
-                    markeredgecolor='#FF6347', markeredgewidth=1, zorder=3)
-        
-        ax2_bottom.set_title('Conserved Differential Proportion', fontweight='bold', fontsize=16)
-        ax2_bottom.set_ylabel('Preservation Rate (%)', fontsize=14)
-        ax2_bottom.set_xlabel('Parameter Combinations', fontsize=14)
-        ax2_bottom.set_xticks(self.x_pos)
-        ax2_bottom.set_xticklabels(self.combo_labels, rotation=45, ha='right', fontsize=12)
-        ax2_bottom.legend(loc='best', fontsize=11)
-        ax2_bottom.grid(True, alpha=0.3)
-        
+
+        fig2, axes = vc.subplots(2, 1, figsize=(12, 14))
+        all_means = []
+        for ax, metric, title, marker in zip(axes, [BIO_VAR, CONSERVED], ['Biological Variability Preservation', 'Conserved Differential Proportion'], ['o', 's']):
+            corrected_means, corrected_stds = self._extract_metric_values(self.corrected_vs_clean[metric])
+            batch_means, batch_stds = self._extract_metric_values(self.batch_vs_clean[metric])
+            _shade(ax, self.x_pos, batch_means, corrected_means, good_label='Improvement (↑ signal recovery)', bad_label='Degradation (↓ over-correction)')
+            _trace(ax, self.x_pos, corrected_means, corrected_stds, 'b1', 'Y_corrected vs Y_clean', marker)
+            _trace(ax, self.x_pos, batch_means, batch_stds, 'a1', 'Y_with_batch vs Y_clean', marker, dash=(4, 3))
+            ax.set_title(title)
+            ax.set_ylabel('Preservation Rate (%)')
+            ax.set_xticks(self.x_pos, self.combo_labels, rotation=45)
+            ax.legend()
+            ax.grid()
+            all_means += list(corrected_means) + list(batch_means)
+        axes[1].set_xlabel('Parameter Combinations')
+
         # Set consistent y-axis limits
-        all_means = (corrected_biovar_means + batch_biovar_means +
-                    corrected_conserved_means + batch_conserved_means)
         y_min = max(0, min(all_means) - 5)
         y_max = min(100, max(all_means) + 5)
-        ax2_top.set_ylim(y_min, y_max)
-        ax2_bottom.set_ylim(y_min, y_max)
-        
-        plt.tight_layout()
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            if self.verbose:
-                print(f"Biological signal preservation plot saved to: {save_path}")
-        plt.show()
-    
+        for ax in axes:
+            ax.set_ylim(y_min, y_max)
+
+        _finish(fig2, save_path, f"Biological signal preservation plot saved to: {save_path}" if self.verbose else None)
+
     def _plot_tp_fp_rates(self, save_path):
         """Internal: Plot TP/FP rates"""
-        fig, (ax_tp, ax_fp) = plt.subplots(2, 1, figsize=(12, 12))
+        fig, (ax_tp, ax_fp) = vc.subplots(2, 1, figsize=(12, 12))
         
         # Extract data
         tp_batch = self._extract_metric_values(self.diff_absolute_metrics.get('tp_batch_rate', {}))
@@ -853,7 +751,6 @@ class ParameterGridPlotter:
             'ylabel': 'TP Rate (%)',
             'ylim': (0, 100),
             'improvement_direction': 'higher',
-            'legend_loc': 'lower left',
             'reference_line': 100
         }
         self._plot_comparison_subplot(ax_tp, tp_batch, tp_corrected, tp_config)
@@ -864,65 +761,34 @@ class ParameterGridPlotter:
             'ylabel': 'FP Rate (%)',
             'ylim': (0, 100),
             'improvement_direction': 'lower',
-            'legend_loc': 'upper left',
             'reference_line': None
         }
         self._plot_comparison_subplot(ax_fp, fp_batch, fp_corrected, fp_config)
-        ax_fp.set_xlabel('Parameter Combinations', fontsize=14, fontweight='bold')
-        
-        plt.tight_layout()
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            if self.verbose:
-                print(f"Differential expression TP/FP rates plot saved to: {save_path}")
-        plt.show()
-    
+        ax_fp.set_xlabel('Parameter Combinations')
+
+        _finish(fig, save_path, f"Differential expression TP/FP rates plot saved to: {save_path}" if self.verbose else None)
+
     def _plot_comparison_subplot(self, ax, batch_data, corrected_data, config):
         """Plot a single comparison subplot with batch vs corrected data"""
         batch_means, batch_stds = batch_data
         corrected_means, corrected_stds = corrected_data
-        
-        # Plot batch data
-        ax.errorbar(self.x_pos, batch_means, yerr=batch_stds,
-                   label='Y_with_batch', marker='o', capsize=3,
-                   color='#FF6347', linestyle='-', markersize=8, linewidth=2,
-                   markerfacecolor='#FF6347', markeredgecolor='#FF6347', markeredgewidth=1)
-        
-        # Plot corrected data
-        ax.errorbar(self.x_pos, corrected_means, yerr=corrected_stds,
-                   label='Y_corrected', marker='o', capsize=3,
-                   color='#4169E1', linestyle='-', markersize=8, linewidth=2,
-                   markerfacecolor='#4169E1', markeredgecolor='#4169E1', markeredgewidth=1)
-        
-        # Fill between for improvement/degradation
-        batch_arr = np.array(batch_means)
-        corrected_arr = np.array(corrected_means)
-        
-        if config['improvement_direction'] == 'higher':
-            improvement_condition = (corrected_arr >= batch_arr)
-        else:  # 'lower'
-            improvement_condition = (corrected_arr <= batch_arr)
-        
-        ax.fill_between(self.x_pos, batch_arr, corrected_arr,
-                       where=improvement_condition,
-                       color='green', alpha=0.2, interpolate=True, label='Improvement')
-        ax.fill_between(self.x_pos, batch_arr, corrected_arr,
-                       where=~improvement_condition,
-                       color='red', alpha=0.2, interpolate=True, label='Degradation')
-        
+
+        _trace(ax, self.x_pos, batch_means, batch_stds, 'a1', 'Y_with_batch')
+        _trace(ax, self.x_pos, corrected_means, corrected_stds, 'b1', 'Y_corrected')
+        _shade(ax, self.x_pos, batch_means, corrected_means, higher_better=config['improvement_direction'] == 'higher')
+
         # Set labels and styling
-        ax.set_title(config['title'], fontweight='bold', fontsize=15)
-        ax.set_ylabel(config['ylabel'], fontsize=14, fontweight='bold')
-        ax.set_ylim(config['ylim'])
-        ax.set_xticks(self.x_pos)
-        ax.set_xticklabels(self.combo_labels, rotation=45, ha='right', fontsize=11)
-        ax.legend(loc=config['legend_loc'], fontsize=11)
-        ax.grid(True, alpha=0.3, zorder=0)
-        
+        ax.set_title(config['title'])
+        ax.set_ylabel(config['ylabel'])
+        ax.set_ylim(*config['ylim'])
+        ax.set_xticks(self.x_pos, self.combo_labels, rotation=45)
+        ax.legend()
+        ax.grid()
+
         # Add reference line if specified
         if config.get('reference_line') is not None:
-            ax.axhline(y=config['reference_line'], color='black', linestyle='--', alpha=0.5, linewidth=1)
-    
+            ax.axhline(y=config['reference_line'], dash=(4, 3))
+
     def _get_total_glycans_str(self):
         """Extract total glycans estimate for subplot titles"""
         for combo_data in self.all_results.values():
@@ -980,46 +846,11 @@ class ParameterGridPlotter:
         corrected_means, corrected_stds = self._extract_metric_values(self.diff_metrics[config['corrected_key']])
         
         # Create figure
-        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
-        
-        # Plot batch data
-        ax.errorbar(self.x_pos, batch_means, yerr=batch_stds,
-                   label='Y_with_batch', marker='o', capsize=3,
-                   color='#FF6347', linestyle='-', markersize=8, linewidth=2,
-                   markerfacecolor='#FF6347', markeredgecolor='#FF6347', markeredgewidth=1)
-        
-        # Plot corrected data
-        ax.errorbar(self.x_pos, corrected_means, yerr=corrected_stds,
-                   label='Y_corrected', marker='o', capsize=3,
-                   color='#4169E1', linestyle='-', markersize=8, linewidth=2,
-                   markerfacecolor='#4169E1', markeredgecolor='#4169E1', markeredgewidth=1)
-        
-        # Fill between for improvement/degradation
-        batch_arr = np.array(batch_means)
-        corrected_arr = np.array(corrected_means)
-        ax.fill_between(self.x_pos, batch_arr, corrected_arr,
-                       where=(corrected_arr >= batch_arr),
-                       color='green', alpha=0.2, interpolate=True, label='Improvement')
-        ax.fill_between(self.x_pos, batch_arr, corrected_arr,
-                       where=(corrected_arr < batch_arr),
-                       color='red', alpha=0.2, interpolate=True, label='Degradation')
-        
-        # Set labels and styling
-        ax.set_title(config['title'], fontweight='bold', fontsize=15)
-        ax.set_ylabel(config['ylabel'], fontsize=14, fontweight='bold')
-        ax.set_xlabel('Parameter Combinations', fontsize=14, fontweight='bold')
-        ax.set_ylim(config['ylim'])
-        ax.set_xticks(self.x_pos)
-        ax.set_xticklabels(self.combo_labels, rotation=45, ha='right', fontsize=11)
-        ax.legend(loc='lower left', fontsize=11)
-        ax.grid(True, alpha=0.3, zorder=0)
-        
-        plt.tight_layout()
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            if self.verbose:
-                print(f"{metric_type.capitalize()} plot saved to: {save_path}")
-        plt.show()
+        fig, ax = vc.subplots(1, 1, figsize=(12, 8))
+        self._plot_comparison_subplot(ax, (batch_means, batch_stds), (corrected_means, corrected_stds), dict(config, improvement_direction='higher'))
+        ax.set_xlabel('Parameter Combinations')
+
+        _finish(fig, save_path, f"{metric_type.capitalize()} plot saved to: {save_path}" if self.verbose else None)
 
 
 
@@ -1079,81 +910,28 @@ class MaskComparisonPlotter:
             'biological_variability_preservation': 'Bio Variability\nPreservation\n(↑ better)',
             'conserved_differential_proportion': 'Conserved Differential\nProportion\n(↑ better)'
         }
-        
-        mask_names = list(self.mask_dirs.keys())
-        colors = ['#E8E8E8', '#B0C4DE', '#87CEEB', '#4682B4']
-        bar_width = 0.2
-        
+
+        stats = {mask_name: self.batch_data[mask_name] for mask_name in self.mask_dirs}
+
         # Plot 1: Change metrics
-        fig1, ax1 = plt.subplots(figsize=(14, 8))
-        x_pos = np.arange(len(change_metrics))
-        
-        for i, mask_name in enumerate(mask_names):
-            means = [self.batch_data[mask_name][m]['mean'] for m in change_metrics]
-            stds = [self.batch_data[mask_name][m]['std'] for m in change_metrics]
-            
-            offset = (i - 1.5) * bar_width
-            bars = ax1.bar(x_pos + offset, means, bar_width, yerr=stds,
-                          label=mask_name, capsize=3, alpha=0.85, 
-                          color=colors[i], edgecolor='black')
-            
-            for bar, mean_val, std_val in zip(bars, means, stds):
-                height = bar.get_height()
-                label_y = height + (std_val if height >= 0 else -std_val)
-                ax1.text(bar.get_x() + bar.get_width()/2., label_y,
-                        f'{mean_val:.1f}', ha='center',
-                        va='bottom' if height >= 0 else 'top', fontsize=9)
-        
-        ax1.set_ylabel('Percentage Change (%)', fontsize=14)
-        ax1.set_title('Batch Effect Reduction Across Mask Configurations (negative is better)\n', fontsize=15)
-        ax1.set_xticks(x_pos)
-        ax1.set_xticklabels([metric_labels[m] for m in change_metrics], fontsize=12)
-        ax1.legend(fontsize=10, loc='upper right')
-        ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-        ax1.grid(axis='y', alpha=0.3)
-        
-        plt.tight_layout()
-        if save_path:
-            path1 = f'{save_path}1_compare_batch_effect_change.png'
-            plt.savefig(path1, dpi=300, bbox_inches='tight')
-            if self.verbose:
-                print(f"Saved: {path1}")
-        plt.show()
-        
+        fig1, ax1 = vc.subplots(figsize=(14, 8))
+        _mask_bars(ax1, stats, change_metrics, metric_labels)
+        ax1.set_ylabel('Percentage Change (%)')
+        ax1.set_title('Batch Effect Reduction Across Mask Configurations (negative is better)')
+        ax1.axhline(y=0, color='ink', dash=None)
+        path1 = f'{save_path}1_compare_batch_effect_change.png' if save_path else None
+        _finish(fig1, path1, f"Saved: {path1}" if self.verbose else None)
+
         # Plot 2: Preservation metrics
-        fig2, ax2 = plt.subplots(figsize=(14, 8))
-        x_pos_pres = np.arange(len(preservation_metrics))
-        
-        for i, mask_name in enumerate(mask_names):
-            means = [self.batch_data[mask_name][m]['mean'] for m in preservation_metrics]
-            stds = [self.batch_data[mask_name][m]['std'] for m in preservation_metrics]
-            
-            offset = (i - 1.5) * bar_width
-            bars = ax2.bar(x_pos_pres + offset, means, bar_width, yerr=stds,
-                          label=mask_name, capsize=3, alpha=0.85,
-                          color=colors[i], edgecolor='black')
-            
-            for bar, mean_val, std_val in zip(bars, means, stds):
-                ax2.text(bar.get_x() + bar.get_width()/2., bar.get_height() + std_val + 1,
-                        f'{mean_val:.1f}', ha='center', va='bottom', fontsize=10)
-        
-        ax2.set_ylabel('Preservation Percentage (%)', fontsize=14)
-        ax2.set_title('Biological Signal Preservation Across Mask Configurations \n (higher is better)\n', fontsize=15)
-        ax2.set_xticks(x_pos_pres)
-        ax2.set_xticklabels([metric_labels[m] for m in preservation_metrics], fontsize=12)
-        ax2.legend(fontsize=10, loc='lower right')
-        ax2.axhline(y=100, color='black', linestyle='--', alpha=0.5)
-        ax2.axhline(y=50, color='gray', linestyle=':', alpha=0.5)
-        ax2.grid(axis='y', alpha=0.3)
-        
-        plt.tight_layout()
-        if save_path:
-            path2 = f'{save_path}2_compare_bio_preservation.png'
-            plt.savefig(path2, dpi=300, bbox_inches='tight')
-            if self.verbose:
-                print(f"Saved: {path2}")
-        plt.show()
-        
+        fig2, ax2 = vc.subplots(figsize=(14, 8))
+        _mask_bars(ax2, stats, preservation_metrics, metric_labels)
+        ax2.set_ylabel('Preservation Percentage (%)')
+        ax2.set_title('Biological Signal Preservation Across Mask Configurations\n(higher is better)')
+        ax2.axhline(y=100, color='ink', dash=(4, 3))
+        ax2.axhline(y=50, color='muted')
+        path2 = f'{save_path}2_compare_bio_preservation.png' if save_path else None
+        _finish(fig2, path2, f"Saved: {path2}" if self.verbose else None)
+
         return ['batch_effect_change', 'bio_preservation']
     
     def plot_differential_expression(self, save_path=None):
@@ -1178,45 +956,15 @@ class MaskComparisonPlotter:
             'batch_fp_rate': 'Batch\nFP Rate (%)',
             'corrected_fp_rate': 'Corrected\nFP Rate (%)'
         }
-        
-        mask_names = list(self.mask_dirs.keys())
-        colors = ['#E8E8E8', '#B0C4DE', '#87CEEB', '#4682B4']
-        bar_width = 0.2
-        
-        fig, ax = plt.subplots(figsize=(14, 8))
-        x_pos = np.arange(len(metrics))
-        
-        for i, mask_name in enumerate(mask_names):
-            means = [self.de_data[mask_name][m]['mean'] for m in metrics]
-            stds = [self.de_data[mask_name][m]['std'] for m in metrics]
-            
-            offset = (i - 1.5) * bar_width
-            bars = ax.bar(x_pos + offset, means, bar_width, yerr=stds,
-                         label=mask_name, capsize=3, alpha=0.85,
-                         color=colors[i], edgecolor='black')
-            
-            for bar, mean_val, std_val in zip(bars, means, stds):
-                height = bar.get_height()
-                label_y = height + (std_val if height >= 0 else -std_val)
-                ax.text(bar.get_x() + bar.get_width()/2., label_y,
-                       f'{mean_val:.1f}', ha='center',
-                       va='bottom' if height >= 0 else 'top', fontsize=9)
-        
-        ax.set_title('Differential Expression Recovery Across Mask Configurations\n(Batch vs Corrected Comparison)\n', fontsize=15)
-        ax.set_xticks(x_pos)
-        ax.set_xticklabels([metric_labels[m] for m in metrics], fontsize=11)
-        ax.set_ylabel('Percentage (%)', fontsize=14)
-        ax.legend(fontsize=10, loc='upper left')
-        ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
-        ax.grid(axis='y', alpha=0.3)
-        
-        plt.tight_layout()
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            if self.verbose:
-                print(f"Saved: {save_path}")
-        plt.show()
-        
+
+        fig, ax = vc.subplots(figsize=(14, 8))
+        _mask_bars(ax, {mask_name: self.de_data[mask_name] for mask_name in self.mask_dirs}, metrics, metric_labels)
+        ax.set_title('Differential Expression Recovery Across Mask Configurations\n(Batch vs Corrected Comparison)')
+        ax.set_ylabel('Percentage (%)')
+        ax.axhline(y=0, color='ink', dash=None)
+
+        _finish(fig, save_path, f"Saved: {save_path}" if self.verbose else None)
+
         return 'differential_expression'
     
     # ==================== Internal Methods ====================

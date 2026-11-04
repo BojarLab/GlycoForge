@@ -9,6 +9,7 @@
 - **Controllable effects injection**: Systematic grid search over biological effect or batch effect strength parameters
 - **Motif-level effects**: For both bio and batch effects, desired motif differences (e.g., `Neu5Ac: down`) can be introduced. These are propagated in a dynamically constructed biosynthetic network to ensure physiological glycomics data (e.g., corresponding increase in desialylated glycans in the example of `Neu5Ac: down`)
 - **Missing data simulation**: MNAR (left-censored, biased toward low-abundance glycans), MCAR, MAR, and a realistic `mixed` composite, all calibrated on the glycomics datasets in `glycowork`
+- **Known motif-level truth**: `simulate_known_truth()` injects effects on the carriers of chosen motifs of a real glycome and states, for every motif, whether it truly changed
 
 ## Quick Start
 
@@ -146,6 +147,19 @@ Generates two glycomic datasets (e.g., _N_- and _O_-glycomics) that share sample
 **Key parameters:** `n_glycans_A/B`, `bio_strength_A/B`, `k_dir_A/B`, `variance_ratio_A/B`, `coupling_strength`, `n_coupling_components`, `coupling_motif_A/B`, `kappa_mu`, `var_b`, `missing_fraction`, `missing_mechanism`, `mnar_bias`
 
 </details>
+
+## Known motif-level truth
+
+`glycoforge.simulate_known_truth()` benchmarks motif-level tests on cohorts whose differentially abundant motifs are known in advance. A real glycome with its group signal removed is the template (`motif_template()`, which also holds glycowork's glycan x motif counts and containment DAG), effects are injected at the glycan level, and every motif's truth follows from the structures. These two functions need `glycowork>=1.12.0`; everything else in GlycoForge runs on 1.11.
+
+```python
+from glycoforge import motif_template, simulate_known_truth
+template = motif_template("human_serum_parkinson_GSL_PMID40379659")
+sim = simulate_known_truth(template, scenario = "redistribution", n_H = 6, n_U = 6, log2fc = 1, missing_fraction = 0.2, seed = 0)
+sim["table"], sim["truth"], sim["focus"], sim["children"]
+```
+
+Scenarios are `null`, `inherited` (a child's carriers move, and the parent only through them), `own` (carriers of a parent outside all its children move), `redistribution` (mass moves between two children, with the parent's total held), and `multi` (the carriers of up to three DAG roots move). In the truth table, a motif is `true` if an injected glycan carries it and it changes by at least `delta` (0.2 log2 units, estimated from a large draw), `grey` if it carries the injection but changes less, `closure` if it changes without injected carriers, as closure moves every part of a composition, and `null` otherwise. Lists for `n_U` and `log2fc` give several case groups.
 
 ## Use Cases
 

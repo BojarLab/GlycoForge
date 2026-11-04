@@ -1,15 +1,18 @@
 from glycowork.glycan_data.loader import glycomics_data_loader
 from glycowork.glycan_data.data_entry import read_abundances
+from glycowork.glycan_data.frame import GlycoDataFrame
 from glycowork.motif.analysis import get_differential_expression
 from glycowork.motif.graph import subgraph_isomorphism
+from glycowork.motif.annotate import quantify_motifs, get_motif_dag
 import numpy as np
 import pandas as pd
 import os
 import json
 import warnings
 import contextlib
+import inspect
 import io
-import matplotlib.pyplot as plt
+import viscose as vc
 from sklearn.covariance import LedoitWolf
 from glycoforge.sim_bio_factor import simulate_clean_data, generate_alpha_U, define_bio_injection_from_real_data, define_differential_mask, calibrate_pair_corr
 from glycoforge.sim_batch_factor import define_batch_direction, stratified_batches_from_columns, apply_batch_effect, estimate_sigma
@@ -1374,7 +1377,7 @@ def glycoforge_power(
     include_motif=True,
     progress=None
 ):
-    """Monte-Carlo power analysis for a glycomics study design. Returns a matplotlib
+    """Monte-Carlo power analysis for a glycomics study design. Returns a viscose
     Figure and a tidy results DataFrame. Panel A injects a defined Cohen's d into a
     random subset of glycans (glycan-level detection); panel B coherently regulates the
     carriers of target_motif and tests at the motif level via glycowork's motif
@@ -1486,37 +1489,36 @@ def glycoforge_power(
             eff.append(np.mean(es) if es else np.nan)
         return np.array(means), np.array(sems), eff[-1]
 
-    fig, axes = plt.subplots(1, len(panels), figsize=(6.5 * len(panels), 5.2), sharey=len(panels) > 1, squeeze=False)
-    axes = axes[0]
+    fig, axes = vc.subplots(1, len(panels), figsize=(6.5 * len(panels), 5.2))
+    axes = [axes] if len(panels) == 1 else axes
     x = np.array(sample_sizes)
     rows = []
     for ax, panel in zip(axes, panels):
         if panel == "glycan":
-            for d in glycan_effects:
+            for d, color in zip(glycan_effects, fig.pal.colors(len(glycan_effects))):
                 m, se = glycan_curve(d)
                 lo, hi = np.clip(m - 1.96 * se, 0, 1), np.clip(m + 1.96 * se, 0, 1)
-                ln, = ax.plot(x, m, marker="o", label=f"d = {d}")
-                ax.fill_between(x, lo, hi, alpha=0.18, color=ln.get_color())
+                ax.fill_between(x, lo, hi, color=color, alpha=0.18)
+                ax.plot(x, m, color=color, marker="o", label=f"Cohen's d = {d}")
                 for n, p, l, h in zip(sample_sizes, m, lo, hi):
                     rows.append({"level": "glycan", "effect": f"d={d}", "n_per_group": n, "power": p, "ci_low": l, "ci_high": h})
             ax.set_title(f"(A) Glycan-level detection\n{n_diff}/{n_glycans} glycans truly differential")
         else:
-            for shift in motif_shifts:
+            for shift, color in zip(motif_shifts, fig.pal.colors(len(motif_shifts))):
                 m, se, realized = motif_curve(shift)
                 lo, hi = np.clip(m - 1.96 * se, 0, 1), np.clip(m + 1.96 * se, 0, 1)
-                ln, = ax.plot(x, m, marker="s", label=f"d \u2248 {realized:.2f}")
-                ax.fill_between(x, lo, hi, alpha=0.18, color=ln.get_color())
+                ax.fill_between(x, lo, hi, color=color, alpha=0.18)
+                ax.plot(x, m, color=color, marker="s", label=f"Cohen's d \u2248 {realized:.2f}")
                 for n, p, l, h in zip(sample_sizes, m, lo, hi):
                     rows.append({"level": "motif", "effect": f"d~{realized:.2f}", "n_per_group": n, "power": p, "ci_low": l, "ci_high": h})
             ax.set_title(f"(B) Motif-level detection\ntarget: {target_motif} ({int(carrier.sum())}/{n_glycans} carriers)")
-        ax.axhline(power_target, ls="--", c="grey", lw=1)
+        ax.axhline(power_target, dash=(4, 3))
         ax.set_xlabel("Samples per group (n_H = n_U)")
         ax.set_ylim(0, 1.02)
-        ax.grid(alpha=0.3)
-        ax.legend(title="Effect size (Cohen's d)")
+        ax.grid()
+        ax.legend()
     axes[0].set_ylabel("Power")
-    fig.suptitle(f"GlycoForge power analysis. Reference: {ref_label}", y=1.02)
-    fig.tight_layout()
+    fig.suptitle("GlycoForge power analysis", f"Reference: {ref_label}")
     return fig, pd.DataFrame(rows)
 
 
@@ -1568,3 +1570,123 @@ def glycoforge_reliability(df, healthy_prefix, unhealthy_prefix, n_glycans=None,
         print(f"[reliability] n_H={n_H} n_U={n_U} n_glycans={n_glycans} missing={missing_fraction:.1%}")
         print(f"[reliability] real hits={n_real_sig}, expected by chance={fp.mean():.1f} (95th {np.quantile(fp, 0.95):.0f}) -> ~{out['expected_true_positives']:.1f} real")
     return out
+
+
+def motif_template(dataset, # Name of a glycowork dataset, path to an abundance table, or a glycowork-style frame with glycans in the first column
+                   top = 60, # Number of most abundant glycans to keep
+                   min_detection = 0.3, # Minimum fraction of samples in which a kept glycan is detected
+                   feature_set = ['exhaustive', 'known'] # Motif feature sets, as in glycowork's quantify_motifs
+                   ): # Returns a dict for simulate_known_truth: glycans, clr_ref, Sigma, counts (glycans x motifs), motifs (deduplicated, as glycowork tests them), and dag
+    """CLR reference of a real glycome with its group signal removed, its Ledoit-Wolf covariance, the glycan x motif counts, and the containment DAG glycowork
+    builds from them. Building one takes a moment, so pass the result to simulate_known_truth when simulating many replicates of a template. A table without contrasts counts as
+    one group, so whatever differences it holds stay in the template as spread."""
+    if 'carriers' not in inspect.signature(get_motif_dag).parameters:
+        raise ImportError("motif_template and simulate_known_truth need glycowork>=1.12.0; everything else in GlycoForge runs on 1.11.")
+    df = dataset if isinstance(dataset, pd.DataFrame) else read_abundances(dataset)
+    df = df if isinstance(df, GlycoDataFrame) else GlycoDataFrame(df)
+    mat = df.abundance.set_axis(list(df.glycans))
+    groups = list(df.groups.mapping.values()) if df._contrasts else [mat.columns.tolist()]
+    cols = [c for g in groups for c in g]
+    if len(cols) - len(groups) < 2:
+        raise ValueError(f"A template needs at least 2 residual degrees of freedom to estimate its spread; got {len(cols)} samples in {len(groups)} groups.")
+    mat = mat[cols].apply(pd.to_numeric, errors = 'coerce').fillna(0)
+    mat = mat.groupby(mat.index).mean()
+    mat = mat.loc[mat.mean(axis = 1).nlargest(top).index]
+    mat = mat.loc[(mat > 0).mean(axis = 1) >= min_detection]
+    half = mat.where(mat > 0).min(axis = 1) / 2  # zeros are the dataset's own missing values, as in every other templated path
+    clr_ref = clr(mat.where(mat > 0, half, axis = 0).T.values)
+    center = clr_ref.mean(axis = 0)
+    for g in groups:
+        idx = [cols.index(c) for c in g]
+        clr_ref[idx] -= clr_ref[idx].mean(axis = 0) - center  # no real group signal survives into the template
+    motifs, counts = quantify_motifs(mat, glycans = mat.index.tolist(), feature_set = feature_set, return_counts = True)
+    if not set(motifs.index) <= set(counts.columns):
+        raise ValueError("motif_template takes glycomics data; glycoproteomics motifs are per glycosite, with no shared glycan x motif counts.")
+    return {'glycans': mat.index.tolist(), 'clr_ref': clr_ref, 'Sigma': LedoitWolf().fit(clr_ref).covariance_, 'counts': counts, 'motifs': motifs.index.tolist(), 'dag': get_motif_dag(motifs.index.tolist(), carriers = counts)}
+
+
+def simulate_known_truth(template, # Name, path, or frame as in motif_template, or a dict returned by it
+                         scenario = 'inherited', # null, inherited (a child's carriers move, the parent only through them), own (carriers of a parent outside all its children move), redistribution (mass moves between two children, parent total held), or multi (the carriers of up to three DAG roots move, each with a random sign)
+                         n_H = 6, # Samples in the control group
+                         n_U = 6, # Samples in the case group, or a list with one entry per case group
+                         log2fc = 1.0, # Injected change in log2 units, or a list with one entry per case group; 0 in a list gives a null group
+                         missing_fraction = 0.0, # Target fraction of missing values, see apply_missingness
+                         missing_mechanism = 'mixed', # MNAR, MCAR, MAR, or mixed, see apply_missingness
+                         mnar_bias = 1.0, # Intensity bias for MNAR and mixed, see apply_missingness
+                         missing_params = None, # Overrides of the calibrated missingness defaults, see apply_missingness
+                         delta = 0.2, # True motif change in log2 units from which a motif counts as changed
+                         n_truth = 2000, # Samples per group in the large draw that estimates each motif's true change
+                         seed = 0 # Random seed
+                         ): # Returns a dict: table, truth, focus, children, labels, and injection
+    """One cohort with known differentially abundant motifs.
+    table : glycans x samples in percent, NaN where missing; columns H0, ..., then U0, ... (U1_0, ..., U2_0, ... with several case groups)
+    truth : one row per motif, with log2fc (log2fc_U1, ... with several case groups, each case group against control) in the CLR frame of motif abundances, carrier (an injected
+        glycan carries the motif), and class: 'true' for a carrier motif changing by at least delta between any two groups, 'grey' for a carrier motif changing less, 'closure' for a
+        motif without injected carriers that changes by at least delta through closure alone, and 'null' for the rest. Scoring tests against 'true' and 'null' leaves out the two ambiguous classes.
+    focus, children : the parent the injection was built around and the children it involves (with multi, the first root and all hit roots; with null, None and [])
+    labels : group per sample in column order, 0 for control
+    injection : glycans x case groups, the injected shift in natural-log CLR units"""
+    if scenario not in ('null', 'inherited', 'own', 'redistribution', 'multi'):
+        raise ValueError(f"scenario must be 'null', 'inherited', 'own', 'redistribution' or 'multi', got '{scenario}'")
+    tpl = template if isinstance(template, dict) else motif_template(template)
+    glycans, Z, Sigma, W, dag = tpl['glycans'], tpl['clr_ref'], tpl['Sigma'], tpl['counts'], tpl['dag']
+    rng = np.random.default_rng(seed)
+    base = np.exp(Z.mean(axis = 0))
+    base = base / base.sum()
+    carry = {m: W[m].values > 0 for m in W.columns}
+    share = {m: base[carry[m]].sum() for m in W.columns}
+    changes = np.broadcast_to(log2fc, np.size(n_U)).astype(float)
+    unit, up, down, focus, children = np.zeros(len(glycans)), None, None, None, []
+    if scenario == 'multi':
+        children = [str(r) for r in rng.permutation([r for r in dag if not dag.in_degree(r) and share[r] >= 0.02])[:3]]
+        if not children:
+            raise ValueError('no multi target: no DAG root reaches a 2% share of this template')
+        for r in children:
+            unit[carry[r]] = rng.choice([-1, 1])
+        focus = children[0]
+    elif scenario != 'null':
+        parents = [p for p in dag if dag.out_degree(p) >= 2 and 0.02 <= share[p] <= 0.95]
+        for _ in range(200 if parents else 0):
+            p = parents[rng.integers(len(parents))]
+            kids = [c for c in dag.successors(p) if share[c] >= 0.01]
+            own = carry[p] & ~np.logical_or.reduce([carry[c] for c in dag.successors(p)])
+            if scenario == 'own' and base[own].sum() >= 0.01:
+                unit[own], focus, children = 1, p, kids
+                break
+            if scenario == 'inherited' and kids:
+                c = kids[rng.integers(len(kids))]
+                unit[carry[c]], focus, children = 1, p, [c]
+                break
+            if scenario == 'redistribution' and len(kids) >= 2:
+                c1, c2 = (str(c) for c in rng.choice(kids, 2, replace = False))
+                up, down = carry[c1] & ~carry[c2], carry[c2] & ~carry[c1]
+                # Mass moves from one child's exclusive carriers to the other's; the donor has to be able to give it in every case group
+                if base[up].sum() >= 0.01 and base[down].sum() >= 0.01 and (base[up].sum() * (2 ** changes - 1) < base[down].sum() * 0.9).all():
+                    unit[up], focus, children = 1, p, [c1, c2]
+                    break
+        else:
+            raise ValueError(f'no {scenario} target in this template')
+    injections = [unit * f * np.log(2) for f in changes]
+    if scenario == 'redistribution':
+        for inj, f in zip(injections, changes):
+            inj[down] = np.log(1 - base[up].sum() * (2 ** f - 1) / base[down].sum())  # the loss that holds the parent's total
+    several = bool(np.ndim(n_U))
+    aH = np.ones(len(glycans))
+    P, labels = simulate_clean_data(aH, aH, n_H, n_U, seed = seed, real_clr_ref = Z, Sigma_lw = Sigma, injection = injections if several else injections[0])
+    big, big_labels = simulate_clean_data(aH, aH, n_truth, [n_truth] * len(changes) if several else n_truth, seed = seed + 1, real_clr_ref = Z, Sigma_lw = Sigma, injection = injections if several else injections[0])
+    M = big @ W.values  # motif logratios as glycowork computes them: quantify, close, center on the deduplicated motifs it tests
+    M = M / M.sum(axis = 1, keepdims = True) * 100
+    M = np.log2(M + 1e-7)
+    M = M - M[:, W.columns.isin(tpl['motifs'])].mean(axis = 1, keepdims = True)
+    means = np.vstack([M[big_labels == g].mean(axis = 0) for g in range(len(changes) + 1)])
+    changed = means.max(axis = 0) - means.min(axis = 0) >= delta
+    carrier = (W.values[np.any(injections, axis = 0)] > 0).any(axis = 0)
+    case = [f'U{g + 1}' for g in range(len(changes))] if several else ['U']
+    truth = pd.DataFrame((means[1:] - means[0]).T, index = W.columns, columns = [f'log2fc_{c}' for c in case] if several else ['log2fc']).rename_axis('motif')
+    truth['carrier'] = carrier
+    truth['class'] = np.where(carrier, np.where(changed, 'true', 'grey'), np.where(changed, 'closure', 'null'))
+    names = [f'H{i}' for i in range(n_H)] + [f'{c}{"_" if several else ""}{i}' for c, m in zip(case, np.atleast_1d(n_U)) for i in range(m)]
+    table = pd.DataFrame(P.T, index = pd.Index(glycans, name = 'glycan'), columns = names)
+    if missing_fraction > 0:
+        table = apply_missingness(table, missing_fraction = missing_fraction, mechanism = missing_mechanism, mnar_bias = mnar_bias, missing_params = missing_params, group_labels = labels, seed = seed, impute = False, verbose = False)[0]
+    return {'table': table, 'truth': truth, 'focus': focus, 'children': children, 'labels': labels, 'injection': pd.DataFrame(np.array(injections).T, index = table.index, columns = case)}

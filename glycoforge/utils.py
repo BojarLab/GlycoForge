@@ -4,7 +4,7 @@ warnings.filterwarnings("ignore", category = DeprecationWarning, module = "pkg_r
 warnings.filterwarnings("ignore", message = "pkg_resources is deprecated")
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import viscose as vc
 import re
 from sklearn.decomposition import PCA
 from scipy.stats import f_oneway, shapiro, kruskal
@@ -13,6 +13,8 @@ from scipy.special import expit
 from glycowork.motif.graph import subgraph_isomorphism
 from glycowork.glycan_data.loader import remove_unmatched_brackets
 from glycowork.glycan_data.stats import impute_biosynthetic, pvca
+# Aura unless the user chose another palette with viscose.set_palette, before or after importing this
+vc.default_palette('aura')
 
 _network_cache = {}
 
@@ -308,54 +310,32 @@ def plot_pca(data,  # DataFrame (features x samples)
         return ""
 
     # Setup subplots
-    n_plots = sum([bio_groups is not None, batch_groups is not None])
-    if n_plots == 0:
-        return
-    fig, axes = plt.subplots(1, n_plots, figsize = (6 * n_plots, 5))
-    axes = [axes] if n_plots == 1 else axes
-    plot_idx = 0
-    # Plot biological groups (with batch annotations)
+    panels = []
+    # Each panel colors by one grouping and annotates with the other
     if bio_groups is not None:
-        bio_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
-        for i, (group_name, cols) in enumerate(bio_groups.items()):
-            indices = [sample_names.index(c) for c in cols if c in sample_names]
-            axes[plot_idx].scatter(pca_result[indices, 0], pca_result[indices, 1],
-                                   c = bio_colors[i % len(bio_colors)], label = group_name, alpha = 0.7, s = 50)
-            # Add batch annotations on bio-colored plot
-            for idx in indices:
-                batch_label = get_batch_label(sample_names[idx])
-                if batch_label:
-                    axes[plot_idx].annotate(batch_label, (pca_result[idx, 0], pca_result[idx, 1]),
-                                            xytext = (2, 2), textcoords = 'offset points', fontsize = 8, alpha = 0.7)
-        axes[plot_idx].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
-        axes[plot_idx].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
-        axes[plot_idx].set_title(f'{title}\n(colored by bio-groups)')
-        axes[plot_idx].legend()
-        axes[plot_idx].grid(alpha = 0.3)
-        plot_idx += 1
-    # Plot batch groups (with bio annotations)
+        panels.append(('bio-groups', list(bio_groups.items()), get_batch_label))
     if batch_groups is not None:
-        batch_colors = ['#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#FF6B35']
-        for i, (batch_id, cols) in enumerate(sorted(batch_groups.items())):
+        panels.append(('batches', [(f'Batch {b}', cols) for b, cols in sorted(batch_groups.items())], get_bio_label))
+    if not panels:
+        return
+    fig, axes = vc.subplots(1, len(panels), figsize = (6 * len(panels), 5))
+    axes = [axes] if len(panels) == 1 else axes
+    for ax, (colored_by, groups, annotation) in zip(axes, panels):
+        for color, (group_name, cols) in zip(fig.pal.contrast(len(groups)), groups):
             indices = [sample_names.index(c) for c in cols if c in sample_names]
-            axes[plot_idx].scatter(pca_result[indices, 0], pca_result[indices, 1],
-                                   c = batch_colors[i % len(batch_colors)], label = f'Batch {batch_id}', alpha = 0.7,
-                                   s = 50)
-            # Add bio annotations on batch-colored plot
+            ax.scatter(pca_result[indices, 0], pca_result[indices, 1], color = color, label = group_name, s = 50)
             for idx in indices:
-                bio_label = get_bio_label(sample_names[idx])
-                if bio_label:
-                    axes[plot_idx].annotate(bio_label, (pca_result[idx, 0], pca_result[idx, 1]),
-                                            xytext = (2, 2), textcoords = 'offset points', fontsize = 8, alpha = 0.7)
-        axes[plot_idx].set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
-        axes[plot_idx].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
-        axes[plot_idx].set_title(f'{title}\n(colored by batches)')
-        axes[plot_idx].legend()
-        axes[plot_idx].grid(alpha = 0.3)
-    plt.tight_layout()
+                if annotation(sample_names[idx]):
+                    ax.annotate(annotation(sample_names[idx]), (pca_result[idx, 0], pca_result[idx, 1]), offset = (2, 2), size = 8)
+        ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')
+        ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')
+        ax.set_title(f'{title}\n(colored by {colored_by})')
+        ax.legend()
+        ax.grid()
     if save_path:
-        plt.savefig(save_path, dpi = 300, bbox_inches = 'tight')
-    plt.show()
+        fig.save(save_path)
+    # Only an unsaved figure may open the system's image viewer, or a script saving many figures opens as many windows
+    fig.show(viewer = not save_path)
 
 
 def _compute_pca_and_stats(data):

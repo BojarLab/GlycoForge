@@ -802,3 +802,128 @@ def test_coupling_direction_unit_norm():
             f"Column norms should be 1.0, got {norms}"
         )
 
+
+def test_motif_template():
+    """The template has no group signal left, and its graph holds on the structures: every fully resolved carrier of a child carries the parent."""
+    from glycoforge.pipeline import motif_template
+    name = "human_serum_parkinson_GSL_PMID40379659"
+    template = motif_template(name)
+    groups = list(getattr(glycomics_data_loader, name).groups.mapping.values())
+    start = 0
+    for g in groups:
+        assert np.allclose(template['clr_ref'][start:start + len(g)].mean(axis=0), template['clr_ref'].mean(axis=0))
+        start += len(g)
+    assert template['counts'].index.tolist() == template['glycans']
+    resolved = template['counts'].loc[[g for g in template['glycans'] if '{' not in g]]  # a floating substituent cannot refute an edge, as glycowork's graph has it
+    for p, c in template['dag'].edges():
+        assert not ((resolved[c] > 0) & ~(resolved[p] > 0)).any()
+
+
+def test_known_truth_scenarios():
+    """Each scenario moves exactly the glycans it promises, and the truth table follows from them."""
+    from glycoforge.pipeline import motif_template, simulate_known_truth
+    template = motif_template("human_serum_parkinson_GSL_PMID40379659")
+    W, dag = template['counts'], template['dag']
+    base = np.exp(template['clr_ref'].mean(axis=0))
+    base = base / base.sum()
+    for seed in range(5):
+        sim = simulate_known_truth(template, 'null', 4, 4, seed=seed, n_truth=500)
+        assert sim['focus'] is None and sim['children'] == []
+        assert not sim['truth']['carrier'].any() and (sim['injection'].values == 0).all()
+        assert sim['table'].shape == (len(template['glycans']), 8)
+        assert np.allclose(sim['table'].sum(axis=0), 100.0)
+        sim = simulate_known_truth(template, 'inherited', 4, 4, seed=seed, n_truth=500)
+        moved = sim['injection']['U'].values != 0
+        p, c = sim['focus'], sim['children'][0]
+        assert dag.has_edge(p, c) and (moved == (W[c].values > 0)).all()
+        sim = simulate_known_truth(template, 'own', 4, 4, seed=seed, n_truth=500)
+        moved = sim['injection']['U'].values != 0
+        p = sim['focus']
+        assert moved.any() and (W[p].values[moved] > 0).all()
+        assert not any((W[c].values[moved] > 0).any() for c in dag.successors(p))
+        sim = simulate_known_truth(template, 'redistribution', 4, 4, seed=seed, n_truth=500)
+        inj = sim['injection']['U'].values
+        assert (inj > 0).any() and (inj < 0).any()
+        assert np.isclose((base * (np.exp(inj) - 1)).sum(), 0.0, atol=1e-10)
+        assert set(sim['children']) <= set(dag.successors(sim['focus']))
+        sim = simulate_known_truth(template, 'multi', 4, 4, seed=seed, n_truth=500)
+        assert all(not dag.in_degree(r) for r in sim['children'])
+        carrier = (W.values[sim['injection']['U'].values != 0] > 0).any(axis=0)
+        assert (sim['truth']['carrier'].values == carrier).all()
+        changed = sim['truth']['log2fc'].abs() >= 0.2
+        assert (sim['truth']['class'] == np.where(carrier, np.where(changed, 'true', 'grey'), np.where(changed, 'closure', 'null'))).all()
+    first, again = (simulate_known_truth(template, 'own', 4, 4, seed=1, n_truth=500) for _ in range(2))
+    assert first['table'].equals(again['table']) and first['truth'].equals(again['truth'])
+    try:
+        simulate_known_truth(template, 'typo', 4, 4)
+        assert False, "An unknown scenario should raise"
+    except ValueError:
+        pass
+
+
+def test_known_truth_groups_and_missingness():
+    """Several case groups each get their own change, a zero gives a null group, and missingness reaches the target fraction."""
+    from glycoforge.pipeline import motif_template, simulate_known_truth
+    template = motif_template("human_serum_parkinson_GSL_PMID40379659")
+    sim = simulate_known_truth(template, 'inherited', 4, [5, 3], log2fc=[2, 0], seed=0)
+    assert sim['table'].columns.tolist() == [f'H{i}' for i in range(4)] + [f'U1_{i}' for i in range(5)] + [f'U2_{i}' for i in range(3)]
+    assert sim['labels'].tolist() == [0] * 4 + [1] * 5 + [2] * 3
+    assert (sim['injection']['U2'] == 0).all() and (sim['injection']['U1'] != 0).any()
+    assert sim['truth']['log2fc_U2'].abs().max() < 0.2 and sim['truth']['log2fc_U1'].abs().max() > 0.2
+    sim = simulate_known_truth(template, 'redistribution', 4, [4, 4], log2fc=[1, 0.5], seed=0)
+    assert (sim['injection'].abs().max() > 0).all()
+    sim = simulate_known_truth(template, 'null', 10, 10, missing_fraction=0.2, seed=0)
+    assert abs(sim['table'].isna().mean().mean() - 0.2) < 0.05
+
+
+def test_known_truth_frame():
+    """The truth table states motif changes in the frame glycowork tests them, so a large cohort recovers them without an offset."""
+    from glycoforge.pipeline import motif_template, simulate_known_truth
+    from glycowork.motif.analysis import preprocess_data
+    template = motif_template("human_serum_parkinson_GSL_PMID40379659")
+    sim = simulate_known_truth(template, 'redistribution', 200, 200, seed=0)
+    g1, g2 = sim['table'].columns[:200].tolist(), sim['table'].columns[200:].tolist()
+    tf = preprocess_data(sim['table'].reset_index(), g1, g2, motifs=True, feature_set=['exhaustive', 'known'], gamma=0, random_state=0, motif_dag=False)[0]
+    observed = tf[g2].mean(axis=1) - tf[g1].mean(axis=1)
+    assert abs(np.median(observed - sim['truth']['log2fc'].loc[observed.index])) < 0.03
+
+
+def test_motif_template_inputs(tmp_path):
+    """Names, paths, and frames give the same template, glycans in the columns are found, and what cannot be simulated raises."""
+    from glycoforge.pipeline import motif_template
+    from glycowork.glycan_data.loader import glycoproteomics_data_loader
+    name = "human_serum_parkinson_GSL_PMID40379659"
+    df = getattr(glycomics_data_loader, name)
+    assert motif_template(df)['glycans'] == motif_template(name)['glycans']
+    assert np.array_equal(motif_template(df)['clr_ref'], motif_template(name)['clr_ref'])
+    path = tmp_path / "table.csv"
+    pd.DataFrame(df).to_csv(path, index=False)
+    assert motif_template(path)['glycans'] == motif_template(str(path))['glycans'] == motif_template(pd.DataFrame(df))['glycans']
+    assert all('(' in g for g in motif_template("time_series_O_PMID32149347")['glycans'])
+    try:
+        motif_template(pd.DataFrame({'glycan': ['Gal(b1-4)Glc', 'Neu5Ac(a2-3)Gal(b1-4)Glc'], 'a': [1.0, 2.0], 'b': [2.0, 1.0]}))
+        assert False, "Two samples should raise"
+    except ValueError:
+        pass
+    try:
+        motif_template(next(n for n in dir(glycoproteomics_data_loader) if not n.startswith('_') and n not in ('filter', 'prefix')))
+        assert False, "Glycoproteomics data should raise"
+    except ValueError:
+        pass
+
+
+def test_plots_through_viscose(tmp_path):
+    """plot_pca and glycoforge_power draw through viscose and save without opening anything."""
+    from glycoforge.pipeline import glycoforge_power
+    from glycoforge.utils import plot_pca
+    cols = [f's{i}' for i in range(8)]
+    data = pd.DataFrame(np.random.default_rng(0).standard_normal((10, 8)), columns=cols)
+    path = tmp_path / "pca.png"
+    plot_pca(data, bio_groups={'a': cols[:4], 'b': cols[4:]}, batch_groups={1: cols[::2], 2: cols[1::2]}, title="Test", save_path=str(path))
+    assert path.stat().st_size > 0
+    plot_pca(data, title="Nothing to color by", save_path=str(tmp_path / "none.png"))
+    assert not (tmp_path / "none.png").exists()
+    fig, results = glycoforge_power(n_glycans=10, glycan_effects=(0.8,), sample_sizes=(4,), n_seeds=2, include_motif=False)
+    fig.save(str(tmp_path / "power.pdf"))
+    assert (tmp_path / "power.pdf").stat().st_size > 0 and len(results) == 1
+
