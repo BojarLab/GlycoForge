@@ -1576,7 +1576,7 @@ def motif_template(dataset, # Name of a glycowork dataset, path to an abundance 
                    top = 60, # Number of most abundant glycans to keep
                    min_detection = 0.3, # Minimum fraction of samples in which a kept glycan is detected
                    feature_set = ['exhaustive', 'known'] # Motif feature sets, as in glycowork's quantify_motifs
-                   ): # Returns a dict for simulate_known_truth: glycans, clr_ref, Sigma, counts (glycans x motifs), motifs (deduplicated, as glycowork tests them), and dag
+                   ): # Returns a dict for simulate_known_truth: glycans, clr_ref, Sigma, counts (glycans x motifs), motifs (deduplicated, as glycowork tests them), dag, and shift (natural-log CLR difference between the two largest groups, zero for glycans detected in under half of either, and all zero without contrasts)
     """CLR reference of a real glycome with its group signal removed, its Ledoit-Wolf covariance, the glycan x motif counts, and the containment DAG glycowork
     builds from them. Building one takes a moment, so pass the result to simulate_known_truth when simulating many replicates of a template. A table without contrasts counts as
     one group, so whatever differences it holds stay in the template as spread."""
@@ -1596,38 +1596,45 @@ def motif_template(dataset, # Name of a glycowork dataset, path to an abundance 
     half = mat.where(mat > 0).min(axis = 1) / 2  # zeros are the dataset's own missing values, as in every other templated path
     clr_ref = clr(mat.where(mat > 0, half, axis = 0).T.values)
     center = clr_ref.mean(axis = 0)
+    shift = np.zeros(len(mat))
+    if len(groups) > 1:
+        g0, g1 = sorted(groups, key = len)[-2:]
+        quantified = ((mat[g0] > 0).mean(axis = 1) >= 0.5).values & ((mat[g1] > 0).mean(axis = 1) >= 0.5).values  # half-minimum floors, not biology, set the difference of sparser glycans
+        shift[quantified] = (clr_ref[[cols.index(c) for c in g1]].mean(axis = 0) - clr_ref[[cols.index(c) for c in g0]].mean(axis = 0))[quantified]
+        shift[quantified] -= shift[quantified].mean()
     for g in groups:
         idx = [cols.index(c) for c in g]
         clr_ref[idx] -= clr_ref[idx].mean(axis = 0) - center  # no real group signal survives into the template
     motifs, counts = quantify_motifs(mat, glycans = mat.index.tolist(), feature_set = feature_set, return_counts = True)
     if not set(motifs.index) <= set(counts.columns):
         raise ValueError("motif_template takes glycomics data; glycoproteomics motifs are per glycosite, with no shared glycan x motif counts.")
-    return {'glycans': mat.index.tolist(), 'clr_ref': clr_ref, 'Sigma': LedoitWolf().fit(clr_ref).covariance_, 'counts': counts, 'motifs': motifs.index.tolist(), 'dag': get_motif_dag(motifs.index.tolist(), carriers = counts)}
+    return {'glycans': mat.index.tolist(), 'clr_ref': clr_ref, 'Sigma': LedoitWolf().fit(clr_ref).covariance_, 'counts': counts, 'motifs': motifs.index.tolist(), 'dag': get_motif_dag(motifs.index.tolist(), carriers = counts), 'shift': shift}
 
 
 def simulate_known_truth(template, # Name, path, or frame as in motif_template, or a dict returned by it
-                         scenario = 'inherited', # null, inherited (a child's carriers move, the parent only through them), own (carriers of a parent outside all its children move), redistribution (mass moves between two children, parent total held), or multi (the carriers of up to three DAG roots move, each with a random sign)
+                         scenario = 'inherited', # null, inherited (a child's carriers move, the parent only through them), own (carriers of a parent outside all its children move), redistribution (mass moves between two children, parent total held), multi (the carriers of up to three DAG roots move, each with a random sign), or cohort (the glycans holding 90% of the energy of the template's real group difference move along it)
                          n_H = 6, # Samples in the control group
                          n_U = 6, # Samples in the case group, or a list with one entry per case group
-                         log2fc = 1.0, # Injected change in log2 units, or a list with one entry per case group; 0 in a list gives a null group
+                         log2fc = 1.0, # Injected change in log2 units (with cohort, the root mean square over injected glycans), or a list with one entry per case group; 0 in a list gives a null group
                          missing_fraction = 0.0, # Target fraction of missing values, see apply_missingness
                          missing_mechanism = 'mixed', # MNAR, MCAR, MAR, or mixed, see apply_missingness
                          mnar_bias = 1.0, # Intensity bias for MNAR and mixed, see apply_missingness
                          missing_params = None, # Overrides of the calibrated missingness defaults, see apply_missingness
                          delta = 0.2, # True motif change in log2 units from which a motif counts as changed
                          n_truth = 2000, # Samples per group in the large draw that estimates each motif's true change
-                         seed = 0 # Random seed
+                         seed = 0, # Random seed
+                         carrier_mix = 0.0 # With cohort, the share of the injection's energy on a child's carriers, chosen as in inherited; the rest follows the real difference
                          ): # Returns a dict: table, truth, focus, children, labels, and injection
     """One cohort with known differentially abundant motifs.
     table : glycans x samples in percent, NaN where missing; columns H0, ..., then U0, ... (U1_0, ..., U2_0, ... with several case groups)
     truth : one row per motif, with log2fc (log2fc_U1, ... with several case groups, each case group against control) in the CLR frame of motif abundances, carrier (an injected
         glycan carries the motif), and class: 'true' for a carrier motif changing by at least delta between any two groups, 'grey' for a carrier motif changing less, 'closure' for a
         motif without injected carriers that changes by at least delta through closure alone, and 'null' for the rest. Scoring tests against 'true' and 'null' leaves out the two ambiguous classes.
-    focus, children : the parent the injection was built around and the children it involves (with multi, the first root and all hit roots; with null, None and [])
+    focus, children : the parent the injection was built around and the children it involves (with multi, the first root and all hit roots; with null, and with cohort at carrier_mix 0, None and [])
     labels : group per sample in column order, 0 for control
-    injection : glycans x case groups, the injected shift in natural-log CLR units"""
-    if scenario not in ('null', 'inherited', 'own', 'redistribution', 'multi'):
-        raise ValueError(f"scenario must be 'null', 'inherited', 'own', 'redistribution' or 'multi', got '{scenario}'")
+    injection : glycans x case groups, the injected shift in natural-log CLR units; with cohort, glycans outside the 90% of the energy stay at exactly zero, so an injected glycan and the classes above mean what they mean in every other scenario"""
+    if scenario not in ('null', 'inherited', 'own', 'redistribution', 'multi', 'cohort'):
+        raise ValueError(f"scenario must be 'null', 'inherited', 'own', 'redistribution', 'multi' or 'cohort', got '{scenario}'")
     tpl = template if isinstance(template, dict) else motif_template(template)
     glycans, Z, Sigma, W, dag = tpl['glycans'], tpl['clr_ref'], tpl['Sigma'], tpl['counts'], tpl['dag']
     rng = np.random.default_rng(seed)
@@ -1638,13 +1645,18 @@ def simulate_known_truth(template, # Name, path, or frame as in motif_template, 
     changes = np.broadcast_to(log2fc, np.size(n_U)).astype(float)
     unit, up, down, focus, children = np.zeros(len(glycans)), None, None, None, []
     if scenario == 'multi':
-        children = [str(r) for r in rng.permutation([r for r in dag if not dag.in_degree(r) and share[r] >= 0.02])[:3]]
-        if not children:
-            raise ValueError('no multi target: no DAG root reaches a 2% share of this template')
-        for r in children:
-            unit[carry[r]] = rng.choice([-1, 1])
-        focus = children[0]
-    elif scenario != 'null':
+        roots = [r for r in dag if not dag.in_degree(r) and share[r] >= 0.02]
+        for _ in range(200 if roots else 0):
+            unit[:] = 0
+            children = [str(r) for r in rng.permutation(roots)[:3]]
+            for r in children:
+                unit[carry[r]] = rng.choice([-1, 1])
+            if max(base[unit == v].sum() for v in (-1, 0, 1)) <= 0.95:  # a shift shared by nearly all of the mass only renormalizes
+                focus = children[0]
+                break
+        else:
+            raise ValueError('no multi target: no draw of DAG roots moves the composition of this template')
+    elif scenario != 'null' and (scenario != 'cohort' or carrier_mix > 0):
         parents = [p for p in dag if dag.out_degree(p) >= 2 and 0.02 <= share[p] <= 0.95]
         for _ in range(200 if parents else 0):
             p = parents[rng.integers(len(parents))]
@@ -1653,7 +1665,7 @@ def simulate_known_truth(template, # Name, path, or frame as in motif_template, 
             if scenario == 'own' and base[own].sum() >= 0.01:
                 unit[own], focus, children = 1, p, kids
                 break
-            if scenario == 'inherited' and kids:
+            if scenario in ('inherited', 'cohort') and kids:
                 c = kids[rng.integers(len(kids))]
                 unit[carry[c]], focus, children = 1, p, [c]
                 break
@@ -1666,6 +1678,15 @@ def simulate_known_truth(template, # Name, path, or frame as in motif_template, 
                     break
         else:
             raise ValueError(f'no {scenario} target in this template')
+    if scenario == 'cohort':
+        if not tpl['shift'].any():
+            raise ValueError('no cohort target: this template holds no quantified difference between two groups')
+        order = np.argsort(-tpl['shift'] ** 2)
+        kept = order[:np.searchsorted(np.cumsum(tpl['shift'][order] ** 2) / (tpl['shift'] ** 2).sum(), 0.9) + 1]
+        real = np.zeros(len(glycans))
+        real[kept] = tpl['shift'][kept]
+        unit = np.sqrt(1 - carrier_mix) * real / np.linalg.norm(real) + np.sqrt(carrier_mix) * unit / max(np.linalg.norm(unit - unit.mean()), 1e-12)
+        unit = unit / np.sqrt((unit[unit != 0] ** 2).mean())
     injections = [unit * f * np.log(2) for f in changes]
     if scenario == 'redistribution':
         for inj, f in zip(injections, changes):

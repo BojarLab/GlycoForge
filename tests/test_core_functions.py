@@ -848,6 +848,7 @@ def test_known_truth_scenarios():
         assert set(sim['children']) <= set(dag.successors(sim['focus']))
         sim = simulate_known_truth(template, 'multi', 4, 4, seed=seed, n_truth=500)
         assert all(not dag.in_degree(r) for r in sim['children'])
+        assert max(base[np.sign(sim['injection']['U'].values) == v].sum() for v in (-1, 0, 1)) <= 0.95
         carrier = (W.values[sim['injection']['U'].values != 0] > 0).any(axis=0)
         assert (sim['truth']['carrier'].values == carrier).all()
         changed = sim['truth']['log2fc'].abs() >= 0.2
@@ -874,6 +875,40 @@ def test_known_truth_groups_and_missingness():
     assert (sim['injection'].abs().max() > 0).all()
     sim = simulate_known_truth(template, 'null', 10, 10, missing_fraction=0.2, seed=0)
     assert abs(sim['table'].isna().mean().mean() - 0.2) < 0.05
+
+
+def test_known_truth_cohort():
+    """The cohort scenario moves the glycans holding 90% of the real difference along it, the rest stay at zero, and the classes read as in every other scenario."""
+    from glycoforge.pipeline import motif_template, simulate_known_truth
+    template = motif_template("human_serum_parkinson_GSL_PMID40379659")
+    W, shift = template['counts'], template['shift']
+    sim = simulate_known_truth(template, 'cohort', 4, 4, seed=0, n_truth=500)
+    inj = sim['injection']['U'].values
+    moved = inj != 0
+    assert sim['focus'] is None and sim['children'] == []
+    assert np.isclose(np.sqrt((inj[moved] ** 2).mean()), np.log(2))
+    assert np.allclose(inj[moved] / shift[moved], (inj[moved] / shift[moved])[0])
+    assert moved.sum() < (shift != 0).sum() and (shift[moved] ** 2).sum() >= 0.9 * (shift ** 2).sum()
+    assert np.abs(shift[moved]).min() >= np.abs(shift[~moved]).max()
+    carrier = (W.values[moved] > 0).any(axis=0)
+    changed = sim['truth']['log2fc'].abs() >= 0.2
+    assert (sim['truth']['carrier'].values == carrier).all()
+    assert (sim['truth']['class'] == np.where(carrier, np.where(changed, 'true', 'grey'), np.where(changed, 'closure', 'null'))).all()
+    inherited, mixed = simulate_known_truth(template, 'inherited', 4, 4, seed=0, n_truth=500), simulate_known_truth(template, 'cohort', 4, 4, seed=0, n_truth=500, carrier_mix=1)
+    assert np.allclose(inherited['injection'], mixed['injection']) and inherited['focus'] == mixed['focus']
+    half = simulate_known_truth(template, 'cohort', 4, 4, seed=0, n_truth=500, carrier_mix=0.5)
+    assert half['focus'] is not None and (half['injection']['U'] != 0).sum() >= moved.sum()
+    assert (simulate_known_truth(template, 'cohort', 4, [4, 4], log2fc=[1, 0], seed=0, n_truth=500)['injection']['U2'] == 0).all()
+    try:
+        simulate_known_truth({**template, 'shift': np.zeros(len(shift))}, 'cohort', 4, 4)
+        assert False, "A template without a group difference should raise"
+    except ValueError:
+        pass
+    try:
+        simulate_known_truth("human_serum_gangliosidosis_GSL_PMID39190143", 'multi', 4, 4)
+        assert False, "A template whose roots all carry every glycan should raise"
+    except ValueError:
+        pass
 
 
 def test_known_truth_frame():

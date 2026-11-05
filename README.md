@@ -9,7 +9,7 @@
 - **Controllable effects injection**: Systematic grid search over biological effect or batch effect strength parameters
 - **Motif-level effects**: For both bio and batch effects, desired motif differences (e.g., `Neu5Ac: down`) can be introduced. These are propagated in a dynamically constructed biosynthetic network to ensure physiological glycomics data (e.g., corresponding increase in desialylated glycans in the example of `Neu5Ac: down`)
 - **Missing data simulation**: MNAR (left-censored, biased toward low-abundance glycans), MCAR, MAR, and a realistic `mixed` composite, all calibrated on the glycomics datasets in `glycowork`
-- **Known motif-level truth**: `simulate_known_truth()` injects effects on the carriers of chosen motifs of a real glycome and states, for every motif, whether it truly changed
+- **Known motif-level truth**: `simulate_known_truth()` injects effects on the carriers of chosen motifs of a real glycome, or along its real group difference, and states, for every motif, whether it truly changed
 
 ## Quick Start
 
@@ -159,7 +159,7 @@ sim = simulate_known_truth(template, scenario = "redistribution", n_H = 6, n_U =
 sim["table"], sim["truth"], sim["focus"], sim["children"]
 ```
 
-Scenarios are `null`, `inherited` (a child's carriers move, and the parent only through them), `own` (carriers of a parent outside all its children move), `redistribution` (mass moves between two children, with the parent's total held), and `multi` (the carriers of up to three DAG roots move). In the truth table, a motif is `true` if an injected glycan carries it and it changes by at least `delta` (0.2 log2 units, estimated from a large draw), `grey` if it carries the injection but changes less, `closure` if it changes without injected carriers, as closure moves every part of a composition, and `null` otherwise. Lists for `n_U` and `log2fc` give several case groups.
+Scenarios are `null`, `inherited` (a child's carriers move, and the parent only through them), `own` (carriers of a parent outside all its children move), `redistribution` (mass moves between two children, with the parent's total held), `multi` (the carriers of up to three DAG roots move), and `cohort` (the real difference between the template's two largest groups moves the glycans holding 90% of its energy, scaled so that its root mean square over them is `log2fc`). The first four are set-shaped, so a method built on carrier sets matches them by construction; `cohort` puts its signal on the noise axes as real cohorts do, and `carrier_mix` moves between the two. In the truth table, a motif is `true` if an injected glycan carries it and it changes by at least `delta` (0.2 log2 units, estimated from a large draw), `grey` if it carries the injection but changes less, `closure` if it changes without injected carriers, as closure moves every part of a composition, and `null` otherwise. Lists for `n_U` and `log2fc` give several case groups.
 
 ## Use Cases
 
