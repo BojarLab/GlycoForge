@@ -1489,7 +1489,7 @@ def glycoforge_power(
             eff.append(np.mean(es) if es else np.nan)
         return np.array(means), np.array(sems), eff[-1]
 
-    fig, axes = vc.subplots(1, len(panels), figsize=(6.5 * len(panels), 5.2))
+    fig, axes = vc.subplots(1, len(panels), figsize=(6.5 * len(panels), 5.2), sharey=True)
     axes = [axes] if len(panels) == 1 else axes
     x = np.array(sample_sizes)
     rows = []
