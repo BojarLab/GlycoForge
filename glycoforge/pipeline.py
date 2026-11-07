@@ -10,7 +10,6 @@ import os
 import json
 import warnings
 import contextlib
-import inspect
 import io
 import viscose as vc
 from sklearn.covariance import LedoitWolf
@@ -1580,8 +1579,6 @@ def motif_template(dataset, # Name of a glycowork dataset, path to an abundance 
     """CLR reference of a real glycome with its group signal removed, its Ledoit-Wolf covariance, the glycan x motif counts, and the containment DAG glycowork
     builds from them. Building one takes a moment, so pass the result to simulate_known_truth when simulating many replicates of a template. A table without contrasts counts as
     one group, so whatever differences it holds stay in the template as spread."""
-    if 'carriers' not in inspect.signature(get_motif_dag).parameters:
-        raise ImportError("motif_template and simulate_known_truth need glycowork>=1.12.0; everything else in GlycoForge runs on 1.11.")
     df = dataset if isinstance(dataset, pd.DataFrame) else read_abundances(dataset)
     df = df if isinstance(df, GlycoDataFrame) else GlycoDataFrame(df)
     mat = df.abundance.set_axis(list(df.glycans))
