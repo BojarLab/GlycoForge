@@ -119,7 +119,8 @@ def simulate(
     verbose=False,
     save_csv=True,
     show_pca_plots=None,
-    eps=1e-6
+    eps=1e-6,
+    n_truth=2000  # samples per group in the large draw that gives each glycan's within-group SD for 1_true_effects (as in simulate_known_truth)
 ):
     # Parse config if batch_effect_direction contains nested structure
     if batch_effect_direction is not None and isinstance(batch_effect_direction, dict) and 'mode' in batch_effect_direction:
@@ -220,7 +221,8 @@ def simulate(
                 'verbose': verbose,
                 'save_csv': save_csv,
                 'show_pca_plots': show_pca_plots,
-                'eps': eps
+                'eps': eps,
+                'n_truth': n_truth
             }
             # Update with current grid values
             kwargs.update(current_params)
@@ -546,16 +548,16 @@ def simulate(
                 alpha_U = [alpha_H.copy() for _ in _n_case]
         # Step 3: Generate clean data
         if use_real_effect_sizes:
-            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, _n_case, seed = seed, verbose = verbose,
-                                            real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn,
-                                            injection = [np.array(_d['injection']) for _d in bio_debug_info],
-                                            pair_corr = pair_corr_cal)
+            P, labels, clr_shift = simulate_clean_data(alpha_H, alpha_U, n_H, _n_case, seed = seed, verbose = verbose,
+                                                       real_clr_ref = _clr_all_real, Sigma_lw = Sigma_mvn,
+                                                       injection = [np.array(_d['injection']) for _d in bio_debug_info],
+                                                       pair_corr = pair_corr_cal, return_shift = True)
         else:
             _use_scale = (alpha_U_base is None)
-            P, labels = simulate_clean_data(alpha_H, alpha_U, n_H, _n_case, seed = seed, verbose = verbose,
-                                            real_clr_ref = _clr_all_syn, Sigma_lw = _Sigma_syn,
-                                            injection = _injection_dir_syn, bio_strength = bio_strength * _effect_scale,
-                                            scale_injection = _use_scale, pair_corr = pair_corr_cal)
+            P, labels, clr_shift = simulate_clean_data(alpha_H, alpha_U, n_H, _n_case, seed = seed, verbose = verbose,
+                                                       real_clr_ref = _clr_all_syn, Sigma_lw = _Sigma_syn,
+                                                       injection = _injection_dir_syn, bio_strength = bio_strength * _effect_scale,
+                                                       scale_injection = _use_scale, pair_corr = pair_corr_cal, return_shift = True)
         if glycan_sequences is not None:
             glycan_index = glycan_sequences[:n_glycans]
             index_name = "glycan"
@@ -573,6 +575,22 @@ def simulate(
         if save_csv:
             Y_clean.to_csv(f"{output_dir}/1_Y_clean_seed{seed}.csv", float_format="%.32f")
             Y_clean_clr.to_csv(f"{output_dir}/1_Y_clean_clr_seed{seed}.csv", float_format="%.32f")
+            # Ground truth per glycan: the exact CLR shift of each case group from healthy (log2, closure included), the SD within a
+            # group from a large unshifted draw (n_truth per group, seed + 1, as in simulate_known_truth), and their ratio (Cohen's d)
+            _big, _ = simulate_clean_data(alpha_H, alpha_U, n_truth, [n_truth] * len(_n_case), seed = seed + 1,
+                                          real_clr_ref = _clr_all_real if use_real_effect_sizes else _clr_all_syn,
+                                          Sigma_lw = Sigma_mvn if use_real_effect_sizes else _Sigma_syn,
+                                          injection = [np.zeros(n_glycans)] * len(_n_case), pair_corr = pair_corr_cal)
+            _sd = clr(_big).std(axis = 0, ddof = 1) / np.log(2)
+            _log2fc = clr_shift / np.log(2)  # one row per case group
+            _cases = [""] if len(_n_case) == 1 else [f"_{_name}" for _name in _group_names[1:]]  # column suffixes, e.g. log2fc_unhealthy2
+            true_effects = pd.DataFrame(index = Y_clean.index)
+            for _g, _c in enumerate(_cases):
+                true_effects[f"log2fc{_c}"] = _log2fc[_g]
+            true_effects["sd"] = _sd
+            for _g, _c in enumerate(_cases):
+                true_effects[f"effect_size{_c}"] = _log2fc[_g] / _sd
+            true_effects.to_csv(f"{output_dir}/1_true_effects_seed{seed}.csv", float_format="%.32f")
         # Quick check: Simulated clean data bio effect (all modes)
         Y_clean_bio_check, _ = check_bio_effect(
             Y_clean_clr, labels,
@@ -625,7 +643,7 @@ def simulate(
         bio_labels = labels
         bio_groups = {_name.capitalize(): list(Y_clean_clr.columns[labels == g]) for g, _name in enumerate(_group_names)}
         # Step 4.5: Apply missingness
-        Y_missing, Y_missing_clr, missing_mask, missing_diagnostics = apply_missingness(
+        Y_missing, Y_missing_clr, missing_mask, missing_diagnostics, missing_mechanisms = apply_missingness(
             Y_with_batch,
             missing_fraction=missing_fraction,
             mechanism=missing_mechanism,
@@ -634,11 +652,13 @@ def simulate(
             group_labels=bio_labels,
             batch_labels=batch_labels,
             seed=seed,
-            verbose=verbose
+            verbose=verbose,
+            return_mechanism=True
         )
         if missing_fraction > 0 and save_csv:
             Y_missing.to_csv(f"{output_dir}/3_Y_with_batch_and_missing_seed{seed}.csv", float_format="%.32f")
             Y_missing_clr.to_csv(f"{output_dir}/3_Y_with_batch_and_missing_clr_seed{seed}.csv", float_format="%.32f")
+            missing_mechanisms.to_csv(f"{output_dir}/3_missing_mechanism_seed{seed}.csv")  # which mechanism hid each value, empty where observed
         # Use Y_missing_clr for subsequent analysis if missingness applied
         Y_for_analysis = Y_missing_clr if missing_fraction > 0 else Y_with_batch_clr
         # Step 5: Quick batch effect check
