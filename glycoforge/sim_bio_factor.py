@@ -419,7 +419,8 @@ def calibrate_pair_corr(pair_corr,
 def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
                         seed=None, verbose=False,
                         real_clr_ref = None, Sigma_lw = None, injection = None,
-                        bio_strength = 1.0, scale_injection = False, pair_corr = None):
+                        bio_strength = 1.0, scale_injection = False, pair_corr = None,
+                        return_shift = False):
   """Simulate clean glycomics data via Gaussian copula. Requires real_clr_ref and Sigma_lw (Dirichlet fallback deprecated). Gaussian copula: LW correlation
   matrix defines inter-feature dependencies, empirical marginals from real_clr_ref
   define per-feature distributions, and the CLR-space injection from alpha_H/alpha_U
@@ -453,10 +454,16 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
       Injects biosynthetic substrate-product coupling that shrinkage-regularized
       covariance attenuates. Pre-calibrate with calibrate_pair_corr so achieved
       output Pearson r matches the requested targets.
+  return_shift : bool
+      Also return the shift of each case group (see below); the draws are the same either way.
   Returns
   -------
   P : (n_samples, n_glycans) percent-scale compositional data
   labels : (n_samples,) int, 0 = healthy, g = case group g (1 = unhealthy)
+  shift : (n_case_groups, n_glycans) ndarray, only with return_shift=True
+      The exact CLR difference (natural log) that the injection puts between case group g
+      (row g - 1) and healthy, closure included: every sample of case group g has the CLR it
+      would have without the injection plus shift[g - 1].
   """
   rng = np.random.default_rng(seed)
   n_glycans = len(alpha_H)
@@ -495,21 +502,26 @@ def simulate_clean_data(alpha_H, alpha_U, n_H, n_U,
   elif not np.ndim(n_U):
       injection = [injection]
   sd_ref = X.std(axis = 0)  # scaled shifts are measured on the uninjected draw, so every case group sees the same spread
+  shift = np.zeros((len(injection), n_glycans))  # the shift added to each case group, kept for return_shift
   for g, (inj, b) in enumerate(zip(injection, np.broadcast_to(bio_strength, len(injection))), start = 1):
       if scale_injection:
           # Scaling a unit direction by sqrt(n_glycans) SDs along it put up to bio_strength * sqrt(n_glycans) SDs on the few
           # glycans a localized eigenvector loads on (max shifts of 13-40 CLR units vs ~1-2.5 between real groups)
           rows = np.atleast_2d(inj)
           d = np.clip(np.sqrt(n_glycans) * rows / (np.linalg.norm(rows, axis = 1, keepdims = True) + 1e-10), -3, 3)
-          X[labels == g] += b * sd_ref * d.sum(axis = 0) / np.sqrt(len(rows))
+          shift[g - 1] = b * sd_ref * d.sum(axis = 0) / np.sqrt(len(rows))
       else:
-          X[labels == g] += inj
+          shift[g - 1] = inj
+      X[labels == g] += shift[g - 1]
   # Step 6: Softmax back to percent-scale compositions
   shifted = X - X.max(axis=1, keepdims=True)
   exp_v = np.exp(shifted)
   P = 100.0 * exp_v / exp_v.sum(axis=1, keepdims=True)
   if verbose:
     print(f"simulate_clean_data [Copula]: shape={P.shape}, min={P.min():.2e}, max={P.max():.2f}")
+  if return_shift:
+      # The softmax keeps only the differences between glycans, so the CLR of a case group moves by its shift minus the shift's mean
+      return P, labels, shift - shift.mean(axis = 1, keepdims = True)
   return P, labels
 
 

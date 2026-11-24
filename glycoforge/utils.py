@@ -532,7 +532,7 @@ def check_bio_effect(data_clr, bio_labels, stage_name = "", verbose = True):
 
 def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR", mnar_bias = 1.0,
                       missing_params = None, group_labels = None, batch_labels = None, seed = 42, impute = True,
-                      verbose = True):
+                      verbose = True, return_mechanism = False):
     """Introduce missing values into compositional data under a chosen missingness mechanism.
     Parameters:
     -----------
@@ -570,6 +570,8 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
         Impute the missing values with glycowork's impute_biosynthetic and return their CLR; False skips this and returns None
     verbose : bool
         Print diagnostics
+    return_mechanism : bool
+        Also return which mechanism hid each value (see below); the missing values are the same either way
     Returns:
     --------
     Y_missing : pd.DataFrame or np.ndarray
@@ -579,7 +581,11 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
     missing_mask : np.ndarray
         Boolean mask (True = missing), glycans x samples
     diagnostics : dict
-        Missingness statistics
+        Missingness statistics, including the number of missing values per mechanism (missing_by_mechanism)
+    missing_mechanisms : pd.DataFrame or np.ndarray, only with return_mechanism=True
+        Per value (glycans x samples), the mechanism that hid it: 'MNAR' for the detection limit ('MNAR' and 'mixed'),
+        'MAR' for the abundance-independent dropouts of 'mixed' (their per-sample shifts follow the MAR drivers), the mechanism
+        itself under 'MCAR' and 'MAR', and '' for observed values
     """
     if mechanism not in ("MNAR", "MCAR", "MAR", "mixed"):
         raise ValueError(f"mechanism must be 'MNAR', 'MCAR', 'MAR' or 'mixed', got '{mechanism}'")
@@ -587,8 +593,12 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
         if verbose:
             print("Missingness disabled (missing_fraction=0)")
         Y_clr = clr(Y_compositional.values.T if isinstance(Y_compositional, pd.DataFrame) else Y_compositional.T).T
+        none_missing = np.full(Y_compositional.shape, '', dtype = '<U4')
         if isinstance(Y_compositional, pd.DataFrame):
             Y_clr = pd.DataFrame(Y_clr, index = Y_compositional.index, columns = Y_compositional.columns)
+            none_missing = pd.DataFrame(none_missing, index = Y_compositional.index, columns = Y_compositional.columns)
+        if return_mechanism:
+            return Y_compositional, Y_clr, np.zeros(Y_compositional.shape, dtype = bool), {}, none_missing
         return Y_compositional, Y_clr, np.zeros(Y_compositional.shape, dtype = bool), {}
     params = {'mcar_share': 0.13, 'sample_sd': 0.8, 'dominance': 0.35, 'top_k': 3, 'group_sd': 0.2, 'batch_sd': 0.0,
               **(missing_params or {})}
@@ -647,6 +657,7 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
         except ValueError:
             a = -50.0
         missing_mask = rng.random(Y.shape) < expit(-(a + lin))
+    censored = missing_mask.copy()  # hidden by the detection limit (MNAR and mixed); the draws below add the rest
     # Abundance-independent missingness (MCAR, MAR, dropouts in mixed): p_ij = expit(c + s_i) on eligible cells,
     # with c solved so the expected count hits f_rand
     if f_rand > 0:
@@ -657,6 +668,7 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
         except ValueError:
             c = 50.0
         missing_mask |= eligible & (rng.random(Y.shape) < expit(c + s)[:, None])
+    missing_mechanisms = np.where(censored, 'MNAR', np.where(missing_mask, 'MAR' if mechanism == 'mixed' else mechanism, ''))
     # Apply missingness
     Y_missing = Y.copy()
     Y_missing[missing_mask] = np.nan
@@ -681,6 +693,7 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
         'missing_fraction_target': float(missing_fraction),
         'per_sample_missing': per_sample_missing.tolist(),
         'missing_rate_by_intensity': missing_by_intensity,
+        'missing_by_mechanism': {m: int(np.sum(missing_mechanisms == m)) for m in ('MNAR', 'MCAR', 'MAR') if np.any(missing_mechanisms == m)},
         'mnar_bias': float(mnar_bias),
         'missing_params': {k: float(v) for k, v in params.items()}
     }
@@ -697,6 +710,8 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
         print(f"Total missing: {diagnostics['total_missing']}/{Y.size}")
         if mechanism in ("MNAR", "mixed"):
             print(f"MNAR bias: {mnar_bias}")
+        if mechanism == "mixed":
+            print(f"Missing by mechanism: {diagnostics['missing_by_mechanism']}")
         print(f"\nMissing rate by intensity:")
         for bin_label, rate in missing_by_intensity.items():
             print(f"  {bin_label:>12}: {rate:.1%}")
@@ -705,6 +720,10 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
         Y_missing = pd.DataFrame(Y_missing.T, index = Y_compositional.index, columns = Y_compositional.columns)
         Y_missing_clr = pd.DataFrame(Y_missing_clr.T, index = Y_compositional.index,
                                      columns = Y_compositional.columns) if impute else None
+        missing_mechanisms = pd.DataFrame(missing_mechanisms.T, index = Y_compositional.index, columns = Y_compositional.columns)
     else:
         Y_missing, Y_missing_clr = Y_missing.T, (Y_missing_clr.T if impute else None)
+        missing_mechanisms = missing_mechanisms.T
+    if return_mechanism:
+        return Y_missing, Y_missing_clr, missing_mask.T, diagnostics, missing_mechanisms
     return Y_missing, Y_missing_clr, missing_mask.T, diagnostics
