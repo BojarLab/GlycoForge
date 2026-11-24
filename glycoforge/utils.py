@@ -584,7 +584,8 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
         Missingness statistics, including the number of missing values per mechanism (missing_by_mechanism)
     missing_mechanisms : pd.DataFrame or np.ndarray, only with return_mechanism=True
         Per value (glycans x samples), the mechanism that hid it: 'MNAR' for the detection limit ('MNAR' and 'mixed'),
-        'MCAR' for the abundance-independent dropouts of 'mixed', the mechanism itself under 'MCAR' and 'MAR', and '' for observed values
+        'MAR' for the abundance-independent dropouts of 'mixed' (their per-sample shifts follow the MAR drivers), the mechanism
+        itself under 'MCAR' and 'MAR', and '' for observed values
     """
     if mechanism not in ("MNAR", "MCAR", "MAR", "mixed"):
         raise ValueError(f"mechanism must be 'MNAR', 'MCAR', 'MAR' or 'mixed', got '{mechanism}'")
@@ -667,7 +668,7 @@ def apply_missingness(Y_compositional, missing_fraction = 0.0, mechanism = "MNAR
         except ValueError:
             c = 50.0
         missing_mask |= eligible & (rng.random(Y.shape) < expit(c + s)[:, None])
-    missing_mechanisms = np.where(censored, 'MNAR', np.where(missing_mask, 'MCAR' if mechanism == 'mixed' else mechanism, ''))
+    missing_mechanisms = np.where(censored, 'MNAR', np.where(missing_mask, 'MAR' if mechanism == 'mixed' else mechanism, ''))
     # Apply missingness
     Y_missing = Y.copy()
     Y_missing[missing_mask] = np.nan
